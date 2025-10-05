@@ -1,0 +1,1 @@
+output "vedge_vm_id" { value = azurerm_virtual_machine.this.id }

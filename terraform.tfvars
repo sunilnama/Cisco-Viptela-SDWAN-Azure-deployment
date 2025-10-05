@@ -1,0 +1,5 @@
+location = "eastus"
+resource_group_name = "rg-sdwan-demo"
+controller_vhd_sas = "https://<storageacct>.blob.core.windows.net/<container>/vmanage.vhd?<SAS>"
+admin_username = "azureadmin"
+admin_password = "ChangeMe123!"
