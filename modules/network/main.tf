@@ -4,8 +4,6 @@ location = var.location
 resource_group_name = var.resource_group_name
 address_space = var.address_space
 }
-
-
 resource "azurerm_subnet" "controllers" {
 name = var.controllers_subnet_name
 resource_group_name = var.resource_group_name
