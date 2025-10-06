@@ -4,6 +4,71 @@ resource "azurerm_resource_group" "rg" {
     location = var.location
 }
 
+# Network
+module "network" {
+source = "./modules/network"
+resource_group_name = azurerm_resource_group.rg.name
+location = var.location
+vnet_name = var.vnet_name
+address_space = var.address_space
+controllers_subnet_name = "controllers-subnet"
+controllers_subnet_prefix = var.controllers_subnet_prefix
+vedge_subnet_name = "vedge-subnet"
+vedge_subnet_prefix = var.vedge_subnet_prefix
+}
+
+
+# Import image from VHD
+module "image_import" {
+source = "./modules/image_import"
+
+
+resource_group_name = azurerm_resource_group.rg.name
+location = var.location
+vhd_source_sas = var.controller_vhd_sas
+managed_disk_name = "sdwan-controller-disk"
+image_name = "sdwan-controller-image"
+os_type = "Linux"
+os_state = "Specialized"
+disk_size_gb = 160
+}
+
+
+# Controller instances (vManage / vSmart / vBond / Validator) - example using 1 of each
+module "vmanage" {
+source = "./modules/controller"
+name = "vmanage"
+resource_group_name = azurerm_resource_group.rg.name
+location = var.location
+vm_size = "Standard_DS3_v2"
+controllers_subnet_id = module.network.controllers_subnet_id
+private_ip_allocation = "Static"
+private_ip = "10.0.1.10"
+public_ip_id = module.network.vmanage_pip_id
+admin_username = var.admin_username
+admin_password = var.admin_password
+source_image_id = module.image_import.image_id
+os_disk_size_gb = 160
+tags = { role = "vmanage" }
+}
+
+
+module "vsmart" {
+source = "./modules/controller"
+name = "vsmart"
+resource_group_name = azurerm_resource_group.rg.name
+location = var.location
+vm_size = "Standard_DS3_v2"
+controllers_subnet_id = module.network.controllers_subnet_id
+private_ip_allocation = "Static"
+private_ip = "10.0.1.11"
+admin_username = var.admin_username
+admin_password = var.admin_password
+source_image_id = module.image_import.image_id
+os_disk_size_gb = 160
+tags = { role = "vsmart" }
+}
+
 module "vbond" {
   source                  = "./modules/controller"
   name                    = "vbond"
