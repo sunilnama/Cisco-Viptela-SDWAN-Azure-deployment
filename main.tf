@@ -35,6 +35,8 @@ disk_size_gb = 160
 
 
 # Controller instances (vManage / vSmart / vBond / Validator) - example using 1 of each
+
+# vManage is the centralized network management system. It provides a single pane of glass for configuring, monitoring, and troubleshooting the entire SD-WAN fabric.
 module "vmanage" {
 source = "./modules/controller"
 name = "vmanage"
@@ -52,7 +54,7 @@ os_disk_size_gb = 160
 tags = { role = "vmanage" }
 }
 
-
+# vSmart controller is a central component of the control plane. It plays a critical role in policy management, route distribution, and security across the SD-WAN fabric.
 module "vsmart" {
 source = "./modules/controller"
 name = "vsmart"
@@ -68,6 +70,8 @@ source_image_id = module.image_import.image_id
 os_disk_size_gb = 160
 tags = { role = "vsmart" }
 }
+
+# vBond Orchestrator (often referred to as vBond) plays a crucial role in the initial orchestration and authentication of all devices joining the SD-WAN fabric.
 
 module "vbond" {
   source                  = "./modules/controller"
@@ -86,6 +90,7 @@ module "vbond" {
   tags                    = { role = "vbond" }
 }
 
+# Validator is a certificate validation mechanism used during the control plane bring-up process. It ensures that only authorized and trusted devices (like vEdge routers) can join the SD-WAN fabric.
 module "validator" {
   source                  = "./modules/controller"
   name                    = "validator"
