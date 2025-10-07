@@ -5,7 +5,7 @@ Application Secret
 Tenant ID
 Subscription ID
 (Ensure these are securely managed.)
-B. In the .tfvars file, provide details for the Virtual Network (VNet) and Subnets.
+B. In the .tfvars file, provide details for the  username, Subnets, Vnet and password.
 C. Specify the hostnames and organization ID to configure certificates. These will be used later to authorize the SD-WAN components.
 D. Run the following Terraform commands to initiate the deployment:
 terraform init 
