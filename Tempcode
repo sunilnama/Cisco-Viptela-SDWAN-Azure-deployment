@@ -1,0 +1,53 @@
+
+---
+- name: Sync Infoblox IPAM data to NetBox
+  hosts: local
+  gather_facts: false
+
+  vars:
+    ib_provider:
+      host: "{{ infoblox_host }}"         # e.g., https://nios.mycorp.local
+      username: "{{ infoblox_username }}"
+      password: "{{ infoblox_password }}"
+      wapi_version: "{{ infoblox_wapi_version }}"  # e.g., 2.12
+      ssl_verify: "{{ infoblox_verify_ssl | default(false) }}"
+
+  tasks:
+    - name: Get networks (CIDRs) from Infoblox
+      infoblox.nios_modules.nios_network:
+        provider: "{{ ib_provider }}"
+        state: get
+      register: ib_networks
+
+    - name: Push networks to NetBox as prefixes
+      netbox.netbox.netbox_prefix:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        validate_certs: "{{ netbox_verify_ssl | default(false) }}"
+        data:
+          prefix: "{{ item.network }}"           # e.g., "192.168.5.0/24"
+          status: "{{ sync_prefix_status | default('active') }}"
+          description: "Imported from Infoblox"
+        state: present
+      loop: "{{ ib_networks.results | default([]) }}"
+      when: ib_networks.results is defined
+
+    - name: Get DHCP fixed-address reservations from Infoblox
+      infoblox.nios_modules.nios_fixed_address:
+        provider: "{{ ib_provider }}"
+        state: get
+      register: ib_fixed
+
+    - name: Push fixed IPs to NetBox
+      netbox.netbox.netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        validate_certs: "{{ netbox_verify_ssl | default(false) }}"
+        data:
+          address: "{{ item.ipaddr }}/32"
+          status: "{{ sync_ip_status | default('active') }}"
+          dns_name: "{{ item.name | default(omit) }}"
+          description: "Imported from Infoblox (fixed-address)"
+        state: present
+      loop: "{{ ib_fixed.results | default([]) }}"
+      when: ib_fixed.results is defined
