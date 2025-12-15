@@ -21,28 +21,35 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 ---
-- name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
+- name: Sync Infoblox IPAM data to NetBox (prefixes, IPs, VLANs) + drift create/delete
   hosts: localhost
   gather_facts: false
   connection: local
 
   vars:
-    # Normalize Infoblox host (remove trailing slashes) and WAPI version (remove leading 'v')
+    # -------------------- Infoblox host/version normalization --------------------
     ib_host: "{{ infoblox_host | regex_replace('/+$','') }}"
     ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v','') }}"
     ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
 
-    # NetBox request headers (token required)
+    # -------------------- NetBox REST headers --------------------
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
-    # WAPI paging/limit
+    # -------------------- Tunables & toggles --------------------
     ib_safe_max_results: 500
+
+    remediate_prefixes: true         # create missing prefixes
+    remediate_ips: true              # create missing IPs
+    remediate_vlans: true            # create missing VLANs
+
+    delete_prefixes_missing_in_infoblox: true   # delete prefixes present in NetBox but not in Infoblox
+    delete_vlans_missing_in_infoblox: false     # delete VLANs present in NetBox but not in Infoblox (set true if you want)
 
   tasks:
     ###########################################################################
-    # NetBox readiness + version drift (API-Version header, normalized)
+    # NetBox readiness + version check via API-Version header
     ###########################################################################
     - name: Probe NetBox API root (readiness + version header)
       ansible.builtin.uri:
@@ -63,7 +70,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
-    # >>> Define both semver vars as facts (persist for following tasks)
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
         nb_api_version_semver: "{{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}"
@@ -96,7 +102,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         validate_certs: "{{ infoblox_verify_ssl }}"
         method: GET
         return_content: true
-        status_code: [200, 401]     # 401 still proves endpoint exists
+        status_code: [200, 401]
         timeout: 30
         follow_redirects: none
         use_proxy: no
@@ -139,10 +145,28 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         follow_redirects: none
         use_proxy: no
       register: ib_fixed
-      # 'fixedaddress' field is ipv4addr, not ip_address. [2](https://tutorialreference.com/python/examples/faq/python-error-ssl-sslerror-ssl-wrong-version-number)
+      # 'fixedaddress' field is ipv4addr, not ip_address. [4](https://docs.docker.com/engine/network/port-publishing/)
+
+    # -------------------- Fetch VLANs from Infoblox --------------------
+    - name: Get Infoblox VLANs (id, name, parent, description) (no redirects)
+      ansible.builtin.uri:
+        url: "{{ ib_base }}/vlan?_return_fields=id,name,parent,description&_max_results={{ ib_safe_max_results }}"
+        headers: { Accept: "application/json" }
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 60
+        follow_redirects: none
+        use_proxy: no
+      register: ib_vlans
+      # Infoblox VLAN WAPI object fields documented here. [1](https://docs.ansible.com/projects/ansible/latest/collections/infoblox/nios_modules/index.html)
 
     ###########################################################################
-    # NetBox reads & drift detection
+    # NetBox reads & drift detection (prefixes, IPs)
     ###########################################################################
     - name: Get NetBox prefixes (all)
       ansible.builtin.uri:
@@ -174,13 +198,16 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       ansible.builtin.set_fact:
         ib_network_list: "{{ ib_networks.json | map(attribute='network') | list | default([]) }}"
         ib_ip_list: "{{ ib_fixed.json | map(attribute='ipv4addr') | list | default([]) }}"
+        ib_vlan_list: >-
+          {{ ib_vlans.json | map('combine', {'vid': attribute('id')}) | list
+             | map('extract', ['vid','name','parent','description']) | list }}
 
     - name: Build NetBox lists
       ansible.builtin.set_fact:
         nb_prefix_list: "{{ (nb_prefixes.json.results | map(attribute='prefix') | list) | default([]) }}"
         nb_ip_list: "{{ (nb_ips.json.results | map(attribute='address') | map('regex_replace','/\\d+$','') | list) | default([]) }}"
 
-    - name: Compute drift
+    - name: Compute drift (prefixes, IPs)
       ansible.builtin.set_fact:
         drift_networks_missing_in_nb: "{{ ib_network_list | difference(nb_prefix_list) }}"
         drift_networks_extra_in_nb: "{{ nb_prefix_list | difference(ib_network_list) }}"
@@ -206,7 +233,41 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         } | to_nice_json }}"
 
     ###########################################################################
-    # NetBox remediation with verification (prefixes)
+    # NetBox VLAN reads & drift detection
+    ###########################################################################
+    - name: Get NetBox VLANs (all)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?limit=0"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
+      register: nb_vlans
+
+    - name: Build NetBox VLAN list (VIDs)
+      ansible.builtin.set_fact:
+        nb_vlan_vid_list: "{{ nb_vlans.json.results | map(attribute='vid') | list | default([]) }}"
+        ib_vlan_vid_list: "{{ ib_vlans.json | map(attribute='id') | list | default([]) }}"
+
+    - name: Compute VLAN drift
+      ansible.builtin.set_fact:
+        drift_vlans_missing_in_nb: "{{ ib_vlan_vid_list | difference(nb_vlan_vid_list) }}"
+        drift_vlans_extra_in_nb:   "{{ nb_vlan_vid_list | difference(ib_vlan_vid_list) }}"
+
+    - name: Save VLAN drift to /tmp/drift_vlans.json
+      ansible.builtin.copy:
+        dest: /tmp/drift_vlans.json
+        content: "{{ {
+          'vlans_missing_in_netbox': drift_vlans_missing_in_nb,
+          'vlans_extra_in_netbox': drift_vlans_extra_in_nb
+        } | to_nice_json }}"
+
+    ###########################################################################
+    # NetBox remediation (create) — Prefixes, IPs, VLANs
     ###########################################################################
     - name: Check if prefix already exists (NetBox)
       ansible.builtin.uri:
@@ -242,24 +303,12 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       loop: "{{ drift_networks_missing_in_nb }}"
       loop_control:
         label: "{{ item }}"
+      when: remediate_prefixes | default(true)
       when: >
         (nb_prefix_checks.results | selectattr('item','equalto', item)
          | map(attribute='json') | map(attribute='count') | list | first | int) == 0
       register: nb_prefix_creates
 
-    - name: Show creation results (IDs or error bodies)
-      ansible.builtin.debug:
-        msg: >-
-          {% if nb_prefix_creates is defined %}
-          Statuses: {{ nb_prefix_creates.results | map(attribute='status') | list }}
-          Bodies:   {{ nb_prefix_creates.results | map(attribute='json') | list }}
-          {% else %}
-          No prefixes were posted (all existed or checks failed).
-          {% endif %}
-
-    ###########################################################################
-    # NetBox remediation with verification (IPs) – optional
-    ###########################################################################
     - name: Check if IP already exists (NetBox)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/ip-addresses/?address={{ item }}/32"
@@ -270,7 +319,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         status_code: [200]
         timeout: 30
         follow_redirects: all
-        use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       register: nb_ip_checks
 
@@ -289,21 +337,153 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         timeout: 60
         follow_redirects: all
       loop: "{{ drift_ips_missing_in_nb }}"
+      when: remediate_ips | default(true)
       when: >
         (nb_ip_checks.results | selectattr('item','equalto', item)
          | map(attribute='json') | map(attribute='count') | list | first | int) == 0
       register: nb_ip_creates
 
-    - name: Show IP creation results
+    # -------------------- Create VLANs --------------------
+    - name: Check if VLAN exists in NetBox by vid & name
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ item.vid }}&name={{ item.name | urlencode }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+        follow_redirects: all
+        use_proxy: no
+      loop: "{{ ib_vlan_list }}"
+      loop_control:
+        label: "VID={{ item.vid }} NAME={{ item.name | default('') }}"
+      register: nb_vlan_checks
+
+    - name: Create VLANs in NetBox (expect 201; show response)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: POST
+        body_format: json
+        body:
+          vid: "{{ item.vid | int }}"
+          name: "{{ item.name | default('VLAN' ~ item.vid) }}"
+          status: "active"
+        status_code: [201]
+        return_content: true
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
+      loop: "{{ ib_vlan_list }}"
+      loop_control:
+        label: "VID={{ item.vid }} NAME={{ item.name | default('') }}"
+      when: remediate_vlans | default(true)
+      when: >
+        (nb_vlan_checks.results | selectattr('item.vid','equalto', item.vid)
+         | selectattr('item.name','equalto', item.name | default(''))
+         | map(attribute='json') | map(attribute='count') | list | first | int) == 0
+      register: nb_vlan_creates
+
+    - name: Show creation results (prefixes, VLANs, IPs)
       ansible.builtin.debug:
-        msg: >-
-          {% if nb_ip_creates is defined %}
-          Statuses: {{ nb_ip_creates.results | map(attribute='status') | list }}
-          Bodies:   {{ nb_ip_creates.results | map(attribute='json') | list }}
-          {% else %}
-          No IPs were posted (all existed or checks failed).
-          {% endif %}
+        msg:
+          - "Prefix create statuses: {{ (nb_prefix_creates.results | map(attribute='status') | list) if nb_prefix_creates is defined else [] }}"
+          - "VLAN create statuses:   {{ (nb_vlan_creates.results   | map(attribute='status') | list) if nb_vlan_creates   is defined else [] }}"
+          - "IP create statuses:     {{ (nb_ip_creates.results     | map(attribute='status') | list) if nb_ip_creates     is defined else [] }}"
 
+    ###########################################################################
+    # OPTIONAL: Link prefixes to VLANs in NetBox (requires assignment data)
+    ###########################################################################
+    # NOTE: Infoblox can expose 'assigned_to' for VLANs (nested networks/ipv6nets) in newer WAPI.
+    # If you add this field to the WAPI request and build a vid->networks map, you can PATCH each
+    # NetBox prefix (by its id) to set 'vlan' to the NetBox VLAN pk.
+    # See: NetBox REST filtering & community discussion on VLAN↔Prefix queries.  # 
 
+    ###########################################################################
+    # NetBox remediation (delete) — Prefixes, VLANs (safe toggles)
+    ###########################################################################
+    # -------- Delete prefixes which exist in NetBox but not in Infoblox --------
+    - name: Resolve NetBox prefix IDs for deletion
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+        follow_redirects: all
+      loop: "{{ drift_networks_extra_in_nb }}"
+      loop_control:
+        label: "{{ item }}"
+      when: delete_prefixes_missing_in_infoblox | default(false)
+      register: nb_prefix_delete_lookup
+
+    - name: Delete extra prefixes (require 204; print failures)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ prefix_id }}/"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: DELETE
+        status_code: [204]      # No Content
+        timeout: 30
+        follow_redirects: all
+      vars:
+        prefix_id: "{{ (item.json.results | map(attribute='id') | list | first) | default('') }}"
+      loop: "{{ nb_prefix_delete_lookup.results | default([]) }}"
+      loop_control:
+        label: "{{ (item.item | default('')) }}"
+      when:
+        - delete_prefixes_missing_in_infoblox | default(false)
+        - prefix_id | length > 0
+      register: nb_prefix_deletes
+      failed_when: nb_prefix_deletes.status != 204
+
+    - name: Show prefix deletions
+      ansible.builtin.debug:
+        msg: "Deleted prefixes count: {{ (nb_prefix_deletes.results | selectattr('status','equalto',204) | list | length) if nb_prefix_deletes is defined else 0 }}"
+
+    # -------- Delete VLANs which exist in NetBox but not in Infoblox --------
+    - name: Resolve NetBox VLAN IDs for deletion (by vid)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ item }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+        follow_redirects: all
+      loop: "{{ drift_vlans_extra_in_nb }}"
+      loop_control:
+        label: "VID={{ item }}"
+      when: delete_vlans_missing_in_infoblox | default(false)
+      register: nb_vlan_delete_lookup
+
+    - name: Delete extra VLANs (require 204; print failures)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/{{ vlan_id }}/"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: DELETE
+        status_code: [204]
+        timeout: 30
+        follow_redirects: all
+      vars:
+        vlan_id: "{{ (item.json.results | map(attribute='id') | list | first) | default('') }}"
+      loop: "{{ nb_vlan_delete_lookup.results | default([]) }}"
+      loop_control:
+        label: "VID={{ (item.item | default('')) }}"
+      when:
+        - delete_vlans_missing_in_infoblox | default(false)
+        - vlan_id | length > 0
+      register: nb_vlan_deletes
+      failed_when: nb_vlan_deletes.status != 204
+
+    - name: Show VLAN deletions
+      ansible.builtin.debug:
+        msg: "Deleted VLANs count: {{ (nb_vlan_deletes.results | selectattr('status','equalto',204) | list | length) if nb_vlan_deletes is defined else 0 }}"
 
 
