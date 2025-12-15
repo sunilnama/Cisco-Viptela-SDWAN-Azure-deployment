@@ -21,6 +21,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -28,23 +29,22 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
   connection: local
 
   vars:
-    # Normalize Infoblox host (remove trailing slashes) and WAPI version (remove leading 'v')
+    # Normalize Infoblox host/version (your grid is NIOS 8.5.x ⇒ WAPI v2.11)
     ib_host: "{{ infoblox_host | regex_replace('/+$','') }}"
     ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v','') }}"
     ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
 
-    # NetBox request headers (token required for /api/*)
+    # NetBox headers (token required)
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
-    # Tunables for Infoblox paging/limits
+    # WAPI tunables
     ib_safe_max_results: 500
-    ib_paging_enabled: true
 
   tasks:
     ###########################################################################
-    # NetBox readiness + version drift (read API-Version header)
+    # NetBox readiness + version drift
     ###########################################################################
     - name: Probe NetBox API root (readiness + version header)
       ansible.builtin.uri:
@@ -72,20 +72,13 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       vars:
         min_nb_semver: "{{ min_netbox_version ~ ('.0' if (min_netbox_version.split('.') | length == 2) else '') }}"
       ansible.builtin.assert:
-        that: [ "nb_api_version_semver is version(min_nb_semver, '>=')" ]
+        that: [ "nb_api_version_semver is version(min_nb_semver, '>='" ]
         fail_msg: "NetBox version too old: got {{ nb_api_version_semver }}, need >= {{ min_nb_semver }}."
-
-    - name: Show parsed NetBox API-Version header
-      ansible.builtin.debug:
-        msg: "NetBox API-Version = {{ nb_root.api_version | default('missing') }} (normalized: {{ nb_api_version_semver }})"
+    # (NetBox model & status choices documented: use slugs like 'active', 'reserved'.)  # [3](https://netbox.readthedocs.io/en/stable/models/ipam/prefix/)[2](https://netboxlabs.com/docs/netbox/reference/filtering/)
 
     ###########################################################################
-    # Infoblox WAPI preflight (print and probe the exact URL we will use)
+    # Infoblox WAPI (network/fixedaddress) – already working with v2.11
     ###########################################################################
-    - name: Show WAPI network schema URL
-      ansible.builtin.debug:
-        msg: "Probing WAPI schema at {{ ib_base }}/network?_schema"
-
     - name: Probe WAPI network schema (no redirects)
       ansible.builtin.uri:
         url: "{{ ib_base }}/network?_schema"
@@ -103,170 +96,44 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
     - name: Assert WAPI network schema responded
       ansible.builtin.assert:
-        that:
-          - ib_net_schema.status in [200, 401]
-        fail_msg: >-
-          WAPI network schema probe failed at {{ ib_base }}/network?_schema
-          Status={{ ib_net_schema.status }}.
+        that: [ "ib_net_schema.status in [200, 401]" ]
+        fail_msg: "WAPI network schema probe failed at {{ ib_base }}/network?_schema"
+
+    - name: Get Infoblox networks (CIDRs) with safe _max_results (no redirects)
+      ansible.builtin.uri:
+        url: "{{ ib_base }}/network?_return_fields=network&_max_results={{ ib_safe_max_results }}"
+        headers: { Accept: "application/json" }
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 60
+        follow_redirects: none
+        use_proxy: no
+      register: ib_networks
+
+    - name: Get Infoblox fixed addresses (use ipv4addr; safe _max_results) (no redirects)
+      ansible.builtin.uri:
+        url: "{{ ib_base }}/fixedaddress?_return_fields=ipv4addr,name&_max_results={{ ib_safe_max_results }}"
+        headers: { Accept: "application/json" }
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 60
+        follow_redirects: none
+        use_proxy: no
+      register: ib_fixed
+    # WAPI 'fixedaddress' field is ipv4addr, not ip_address.  # [5](https://docs.ansible.com/projects/ansible/latest/collections/infoblox/index.html)
 
     ###########################################################################
-    # Read from Infoblox WAPI (networks) with safe _max_results and paging fallback
-    ###########################################################################
-    - block:
-        - name: Get Infoblox networks (CIDRs) with safe _max_results (no redirects)
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/network?_return_fields=network&_max_results={{ ib_safe_max_results }}"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 60
-            follow_redirects: none
-            use_proxy: no
-          register: ib_networks
-
-      rescue:
-        - name: Show WAPI error body (networks first attempt)
-          ansible.builtin.debug:
-            msg: "Infoblox networks failed ({{ ib_networks.status | default('unknown') }}): {{ ib_networks.content | default('no body returned') }}"
-
-        - name: Get Infoblox networks with paging enabled (first page) (no redirects)
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/network?_return_fields=network&_paging=1&_return_as_object=1&_max_results={{ ib_safe_max_results }}"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 60
-            follow_redirects: none
-            use_proxy: no
-          register: ib_net_page1
-
-        - name: Initialize aggregated network list from first page
-          ansible.builtin.set_fact:
-            ib_network_pages: "{{ ib_net_page1.json.result | default(ib_net_page1.json | default([])) }}"
-            ib_next_page_id: "{{ ib_net_page1.json.next_page_id | default('') }}"
-
-        - name: Fetch subsequent pages while next_page_id exists (no redirects)
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/network?_return_fields=network&_paging=1&_return_as_object=1&_page_id={{ ib_next_page_id }}"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 60
-            follow_redirects: none
-            use_proxy: no
-          register: ib_net_pageN
-          when: ib_next_page_id != ''
-          until: ib_net_pageN.json.next_page_id | default('') == ''
-          retries: 20
-          delay: 1
-
-        - name: Append subsequent pages to aggregated list (if any)
-          ansible.builtin.set_fact:
-            ib_network_pages: >-
-              {{ ib_network_pages
-                 + ( (ib_net_pageN.results | map(attribute='json') | map(attribute='result') | list | flatten)
-                     if (ib_net_pageN is defined and ib_net_pageN.results is defined) else [] ) }}
-
-        - name: Convert aggregated pages to ib_networks.json shape
-          ansible.builtin.set_fact:
-            ib_networks:
-              json: "{{ ib_network_pages }}"
-
-    ###########################################################################
-    # Read from Infoblox WAPI (fixed addresses) — use ipv4addr, add return_as_object for paging
-    ###########################################################################
-    - block:
-        - name: Get Infoblox fixed addresses (static IPs) with safe _max_results (no redirects)
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/fixedaddress?_return_fields=ipv4addr,name&_max_results={{ ib_safe_max_results }}"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 60
-            follow_redirects: none
-            use_proxy: no
-          register: ib_fixed
-
-      rescue:
-        - name: Show WAPI error body (fixedaddress first attempt)
-          ansible.builtin.debug:
-            msg: "Infoblox fixedaddress failed ({{ ib_fixed.status | default('unknown') }}): {{ ib_fixed.content | default('no body returned') }}"
-
-        - name: Get Infoblox fixed addresses with paging enabled (first page) (no redirects)
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/fixedaddress?_return_fields=ipv4addr,name&_paging=1&_return_as_object=1&_max_results={{ ib_safe_max_results }}"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 60
-            follow_redirects: none
-            use_proxy: no
-          register: ib_fix_page1
-
-        - name: Initialize aggregated fixedaddress list from first page
-          ansible.builtin.set_fact:
-            ib_fixed_pages: "{{ ib_fix_page1.json.result | default(ib_fix_page1.json | default([])) }}"
-            ib_next_fix_page_id: "{{ ib_fix_page1.json.next_page_id | default('') }}"
-
-        - name: Fetch subsequent pages while next_page_id exists (fixedaddress) (no redirects)
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/fixedaddress?_return_fields=ipv4addr,name&_paging=1&_return_as_object=1&_page_id={{ ib_next_fix_page_id }}"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 60
-            follow_redirects: none
-            use_proxy: no
-          register: ib_fix_pageN
-          when: ib_next_fix_page_id != ''
-          until: ib_fix_pageN.json.next_page_id | default('') == ''
-          retries: 20
-          delay: 1
-
-        - name: Append subsequent pages to aggregated fixedaddress list (if any)
-          ansible.builtin.set_fact:
-            ib_fixed_pages: >-
-              {{ ib_fixed_pages
-                 + ( (ib_fix_pageN.results | map(attribute='json') | map(attribute='result') | list | flatten)
-                     if (ib_fix_pageN is defined and ib_fix_pageN.results is defined) else [] ) }}
-
-        - name: Convert aggregated pages to ib_fixed.json shape
-          ansible.builtin.set_fact:
-            ib_fixed:
-              json: "{{ ib_fixed_pages }}"
-
-    ###########################################################################
-    # Read from NetBox REST (token required)
+    # NetBox reads (token required), drift detection
     ###########################################################################
     - name: Get NetBox prefixes (all)
       ansible.builtin.uri:
@@ -275,6 +142,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         validate_certs: "{{ netbox_verify_ssl }}"
         method: GET
         return_content: true
+        status_code: [200]
         timeout: 60
         follow_redirects: all
         use_proxy: no
@@ -287,37 +155,26 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         validate_certs: "{{ netbox_verify_ssl }}"
         method: GET
         return_content: true
+        status_code: [200]
         timeout: 60
         follow_redirects: all
         use_proxy: no
       register: nb_ips
 
-    ###########################################################################
-    # Normalize lists and compute drift
-    ###########################################################################
-    - name: Build Infoblox network list (CIDRs)
+    - name: Build Infoblox lists
       ansible.builtin.set_fact:
         ib_network_list: "{{ ib_networks.json | map(attribute='network') | list | default([]) }}"
-
-    - name: Build NetBox prefix list (CIDRs)
-      ansible.builtin.set_fact:
-        nb_prefix_list: "{{ (nb_prefixes.json.results | map(attribute='prefix') | list) | default([]) }}"
-
-    - name: Build Infoblox fixed IP list
-      ansible.builtin.set_fact:
         ib_ip_list: "{{ ib_fixed.json | map(attribute='ipv4addr') | list | default([]) }}"
 
-    - name: Build NetBox IP list (strip CIDR mask)
+    - name: Build NetBox lists
       ansible.builtin.set_fact:
+        nb_prefix_list: "{{ (nb_prefixes.json.results | map(attribute='prefix') | list) | default([]) }}"
         nb_ip_list: "{{ (nb_ips.json.results | map(attribute='address') | map('regex_replace','/\\d+$','') | list) | default([]) }}"
 
-    - name: Compute network drift
+    - name: Compute drift
       ansible.builtin.set_fact:
         drift_networks_missing_in_nb: "{{ ib_network_list | difference(nb_prefix_list) }}"
         drift_networks_extra_in_nb: "{{ nb_prefix_list | difference(ib_network_list) }}"
-
-    - name: Compute IP drift
-      ansible.builtin.set_fact:
         drift_ips_missing_in_nb: "{{ ib_ip_list | difference(nb_ip_list) }}"
         drift_ips_extra_in_nb: "{{ nb_ip_list | difference(ib_ip_list) }}"
 
@@ -340,9 +197,25 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         } | to_nice_json }}"
 
     ###########################################################################
-    # Optional remediation (create missing in NetBox via REST)
+    # NetBox remediation with verification (prefixes)
     ###########################################################################
-    - name: Create missing prefixes in NetBox (optional)
+    - name: Check if prefix already exists (NetBox)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+        follow_redirects: all
+        use_proxy: no
+      loop: "{{ drift_networks_missing_in_nb }}"
+      loop_control:
+        label: "{{ item }}"
+      register: nb_prefix_checks
+
+    - name: Create prefixes that truly do not exist (require 201; print errors)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/"
         headers: "{{ nb_headers }}"
@@ -352,15 +225,49 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         body:
           prefix: "{{ item }}"
           status: "active"
-          description: "Imported from Infoblox"
-        status_code: [201]
+        status_code: [201]                 # must be Created
+        return_content: true
         timeout: 60
         follow_redirects: all
         use_proxy: no
       loop: "{{ drift_networks_missing_in_nb }}"
-      when: remediate_prefixes | default(false)
+      loop_control:
+        label: "{{ item }}"
+      when: >
+        (nb_prefix_checks.results | selectattr('item','equalto', item)
+         | map(attribute='json') | map(attribute='count') | list | first | int) == 0
+      register: nb_prefix_creates
+      changed_when: nb_prefix_creates.status == 201
+      failed_when: nb_prefix_creates.status != 201
+      # REST API semantics for POST and field choices documented here.  # [7](https://netboxlabs.com/docs/netbox/integrations/rest-api/)[2](https://netboxlabs.com/docs/netbox/reference/filtering/)
 
-    - name: Create missing IPs in NetBox (optional)
+    - name: Show creation results (IDs or error bodies)
+      ansible.builtin.debug:
+        msg: >-
+          {% if nb_prefix_creates is defined %}
+          {{ nb_prefix_creates.results | map(attribute='json') | list }}
+          {% else %}
+          No prefixes were posted (all existed or checks failed).
+          {% endif %}
+
+    ###########################################################################
+    # NetBox remediation with verification (IPs) – optional
+    ###########################################################################
+    - name: Check if IP already exists (NetBox)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?address={{ item }}/32"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+        follow_redirects: all
+        use_proxy: no
+      loop: "{{ drift_ips_missing_in_nb }}"
+      register: nb_ip_checks
+
+    - name: Create IP addresses that do not exist (require 201; print errors)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/ip-addresses/"
         headers: "{{ nb_headers }}"
@@ -370,12 +277,17 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         body:
           address: "{{ item }}/32"
           status: "active"
-          description: "Imported from Infoblox (fixed-address)"
         status_code: [201]
+        return_content: true
         timeout: 60
         follow_redirects: all
         use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
-      when: remediate_ips | default(false)
+      when: >
+        (nb_ip_checks.results | selectattr('item','equalto', item)
+         | map(attribute='json') | map(attribute='count') | list | first | int) == 0
+      register: nb_ip_creates
+      changed_when: nb_ip_creates.status == 201
+      failed_when: nb_ip_creates.status != 201
 
 
