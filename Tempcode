@@ -21,6 +21,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (prefixes, IPs, VLANs) + drift create/delete
   hosts: localhost
