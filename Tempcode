@@ -17,6 +17,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
 
 
 
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -24,7 +25,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
   connection: local
 
   vars:
-    # >>> Set your WAPI version here (matches NIOS 8.5.x) <<<
+    # Use WAPI v2.11 for NIOS 8.5.x (override in group_vars if you need 2.11.1)
     ib_wapi_version_resolved: "{{ infoblox_wapi_version | default('2.11') }}"
 
     # NetBox request headers (token required for /api/*)
@@ -59,13 +60,11 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
-    # Normalize 'API-Version' header (nb_root.api_version) to X.Y.Z for comparison
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
         nb_api_version_semver: >-
           {{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}
 
-    # Normalize baseline and compare versions
     - name: Enforce minimum NetBox version (normalized semver)
       vars:
         min_nb_semver: >-
@@ -96,7 +95,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
             method: GET
             return_content: true
             timeout: 60
-            follow_redirects: all
+            follow_redirects: none        # <<< do not follow redirects
             use_proxy: no
           register: ib_networks
           failed_when: ib_networks.status != 200
@@ -118,6 +117,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
             method: GET
             return_content: true
             timeout: 60
+            follow_redirects: none        # <<< do not follow redirects
             use_proxy: no
           register: ib_net_page1
 
@@ -138,6 +138,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
             method: GET
             return_content: true
             timeout: 60
+            follow_redirects: none        # <<< do not follow redirects
             use_proxy: no
           register: ib_net_pageN
           when: ib_next_page_id != ''
@@ -173,7 +174,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
             method: GET
             return_content: true
             timeout: 60
-            follow_redirects: all
+            follow_redirects: none        # <<< do not follow redirects
             use_proxy: no
           register: ib_fixed
           failed_when: ib_fixed.status != 200
@@ -195,6 +196,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
             method: GET
             return_content: true
             timeout: 60
+            follow_redirects: none        # <<< do not follow redirects
             use_proxy: no
           register: ib_fix_page1
 
@@ -215,6 +217,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
             method: GET
             return_content: true
             timeout: 60
+            follow_redirects: none        # <<< do not follow redirects
             use_proxy: no
           register: ib_fix_pageN
           when: ib_next_fix_page_id != ''
@@ -346,5 +349,4 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
         use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
-
 
