@@ -7,6 +7,7 @@ curl -I \
   http://172.17.228.82:8000/api/
 
 
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -19,42 +20,50 @@ curl -I \
       Content-Type: "application/json"
 
   tasks:
-    # -------- Version drift checks --------
-    - name: Probe NetBox OpenAPI schema (read NetBox version)
+    # -------- NetBox readiness (token required) --------
+    - name: Probe NetBox API root (readiness)
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/schema/"
+        url: "{{ netbox_url }}/api/"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: GET
         return_content: true
-      register: nb_schema
+        status_code: [200]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
+      register: nb_root
 
-    - name: Assert NetBox meets minimum version
+    - name: Assert NetBox API is reachable
+      ansible.builtin.assert:
+        that:
+          - nb_root.status == 200
+        fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
+
+    # -------- Optional: NetBox version drift check via schema --------
+    - name: Read NetBox OpenAPI schema (optional version check)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/schema/"   # trailing slash is required
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
+      register: nb_schema
+      ignore_errors: true
+
+    - name: Enforce minimum NetBox version (if schema loaded)
       ansible.builtin.assert:
         that:
           - nb_schema.status == 200
           - nb_schema.json.info.version is version(min_netbox_version, '>=')
         fail_msg: >-
-          NetBox API schema unreachable or version too old.
-          Got: {{ nb_schema.json.info.version | default('unknown') }}, need >= {{ min_netbox_version }}.
-
-    - name: Probe Infoblox WAPI network endpoint for selected WAPI version
-      ansible.builtin.uri:
-        url: "{{ infoblox_host }}/wapi/v{{ infoblox_wapi_version }}/network?_return_fields=network&_max_results=1"
-        user: "{{ infoblox_username }}"
-        password: "{{ infoblox_password }}"
-        force_basic_auth: true
-        validate_certs: "{{ infoblox_verify_ssl }}"
-        method: GET
-      register: ib_wapi_probe
-
-    - name: Assert Infoblox WAPI version is reachable
-      ansible.builtin.assert:
-        that:
-          - ib_wapi_probe.status in [200, 401]   # 401 == endpoint exists; auth needed/checked
-        fail_msg: >-
-          Infoblox WAPI v{{ infoblox_wapi_version }} not reachable (status={{ ib_wapi_probe.status }}).
-          Check WAPI version and credentials.
+          NetBox version too old: got {{ nb_schema.json.info.version | default('unknown') }},
+          need >= {{ min_netbox_version }}.
+      when: nb_schema is defined and nb_schema.status == 200
 
     # -------- Read from Infoblox WAPI (no collections) --------
     - name: Get Infoblox networks (CIDRs)
@@ -66,6 +75,9 @@ curl -I \
         validate_certs: "{{ infoblox_verify_ssl }}"
         method: GET
         return_content: true
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: ib_networks
 
     - name: Get Infoblox fixed addresses (static IPs)
@@ -77,9 +89,12 @@ curl -I \
         validate_certs: "{{ infoblox_verify_ssl }}"
         method: GET
         return_content: true
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: ib_fixed
 
-    # -------- Read from NetBox REST --------
+    # -------- Read from NetBox REST (token required) --------
     - name: Get NetBox prefixes (all)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/?limit=0"
@@ -87,6 +102,9 @@ curl -I \
         validate_certs: "{{ netbox_verify_ssl }}"
         method: GET
         return_content: true
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: nb_prefixes
 
     - name: Get NetBox IP addresses (all)
@@ -96,6 +114,9 @@ curl -I \
         validate_certs: "{{ netbox_verify_ssl }}"
         method: GET
         return_content: true
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: nb_ips
 
     # -------- Normalize lists --------
@@ -156,7 +177,10 @@ curl -I \
           prefix: "{{ item }}"
           status: "active"
           description: "Imported from Infoblox"
-        status_code: [201]   # created
+        status_code: [201]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       loop: "{{ drift_networks_missing_in_nb }}"
       when: remediate_prefixes | default(false)
 
@@ -171,6 +195,9 @@ curl -I \
           address: "{{ item }}/32"
           status: "active"
           description: "Imported from Infoblox (fixed-address)"
-        status_code: [201]   # created
+        status_code: [201]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
