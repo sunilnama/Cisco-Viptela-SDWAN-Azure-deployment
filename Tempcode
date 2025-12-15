@@ -8,6 +8,14 @@ curl -I \
 
 
 
+curl -k -u admin:pass \
+  "https://<infoblox>/wapi/v2.12/network?_return_fields=network&_max_results=100"
+curl -k -u admin:pass \
+  "https://<infoblox>/wapi/v2.12/fixedaddress?_return_fields=ip_address,name&_max_results=100"
+
+
+
+
 
 
 
