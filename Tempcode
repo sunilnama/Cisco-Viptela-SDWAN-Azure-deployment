@@ -20,6 +20,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (prefixes, IPs, VLANs) + drift create/patch/delete
   hosts: localhost
@@ -194,7 +195,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       register: nb_vlans
 
     ###########################################################################
-    # Build Infoblox lists & maps (robust; no callable filters)
+    # Build Infoblox lists & maps (robust; no callable filters or inline '#' comments)
     ###########################################################################
     - name: Build Infoblox network & IP lists
       ansible.builtin.set_fact:
@@ -216,24 +217,30 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
              } ] }}
       loop: "{{ ib_vlans.json | default([]) }}"
 
-    # Build network → VLAN-ID(s) map using 'vlans' refs on network
+    # ---------- FIXED BLOCK: Build network → VLAN-ID(s) map (two-step; no inline comments) ----------
     - name: Initialize Infoblox network→VLAN map
       ansible.builtin.set_fact:
         ib_net_vlan_map: {}
 
-    - name: Append VLAN ids for each Infoblox network
+    - name: Collect VLAN IDs for each Infoblox network
       ansible.builtin.set_fact:
-        ib_net_vlan_map: >-
-          {{ ib_net_vlan_map | combine({
-               item.network: (
-                 item.vlans | default([])            # [{'vlan': '.../10'}, ...]
-                 | map(attribute='vlan')
-                 | map('regex_replace','^.*/','')    # → 10
-                 | map('int')
-                 | list
-               )
-             }) }}
+        vids_for_net: >-
+          {{
+            item.vlans | default([])
+            | map(attribute='vlan')
+            | map('regex_replace', '^.*/', '')
+            | map('int') | list
+          }}
       loop: "{{ ib_networks.json | default([]) }}"
+      loop_control:
+        label: "{{ item.network }}"
+      register: ib_net_vlan_vids
+
+    - name: Merge per-network VLAN IDs into ib_net_vlan_map
+      ansible.builtin.set_fact:
+        ib_net_vlan_map: "{{ ib_net_vlan_map | combine({ item.item.network: (item.vids_for_net | default([])) }) }}"
+      loop: "{{ ib_net_vlan_vids.results | default([]) }}"
+      when: item.item.network is defined
 
     # Build list of (network, first_vlan_vid) pairs for patching
     - name: Initialize pairs list for prefix→vlan patch
