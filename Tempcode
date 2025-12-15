@@ -15,6 +15,11 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11/network?_schem
 curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_schema"
 
 
+curl -k -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"     # expect 200/401
+curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # if it redirects, you'll see /wapi/ Unknown WAPI version
+
+
+
 
 
 
