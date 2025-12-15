@@ -1,4 +1,6 @@
 
+Netbox token for the sync -- 085ecfd33f9f497536d67570d09f22493ae585f0
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
