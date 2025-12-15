@@ -1,19 +1,18 @@
 
 ---
-- name: Sync Infoblox IPAM data to NetBox (with version & data drift checks)
+- name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
   gather_facts: false
   connection: local
 
   vars:
-    # NetBox REST headers
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
   tasks:
     # -------- Version drift checks --------
-    - name: Probe NetBox OpenAPI schema (to read NetBox version)
+    - name: Probe NetBox OpenAPI schema (read NetBox version)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/schema/"
         headers: "{{ nb_headers }}"
@@ -31,7 +30,7 @@
           NetBox API schema unreachable or version too old.
           Got: {{ nb_schema.json.info.version | default('unknown') }}, need >= {{ min_netbox_version }}.
 
-    - name: Probe Infoblox WAPI (network endpoint for specific WAPI version)
+    - name: Probe Infoblox WAPI network endpoint for selected WAPI version
       ansible.builtin.uri:
         url: "{{ infoblox_host }}/wapi/v{{ infoblox_wapi_version }}/network?_return_fields=network&_max_results=1"
         user: "{{ infoblox_username }}"
@@ -44,37 +43,35 @@
     - name: Assert Infoblox WAPI version is reachable
       ansible.builtin.assert:
         that:
-          - ib_wapi_probe.status in [200, 401]   # 401 means auth required; endpoint exists
+          - ib_wapi_probe.status in [200, 401]   # 401 == endpoint exists; auth needed/checked
         fail_msg: >-
           Infoblox WAPI v{{ infoblox_wapi_version }} not reachable (status={{ ib_wapi_probe.status }}).
           Check WAPI version and credentials.
 
-    # -------- Read from Infoblox (Infoblox collection) --------
-    - name: Get networks (CIDRs) from Infoblox
-      infoblox.nios_modules.nios_facts:
-        gather_subset:
-          - network
-        provider:
-          host: "{{ infoblox_host }}"
-          username: "{{ infoblox_username }}"
-          password: "{{ infoblox_password }}"
-          wapi_version: "{{ infoblox_wapi_version }}"
-          ssl_verify: "{{ infoblox_verify_ssl }}"
-      register: ib_facts
+    # -------- Read from Infoblox WAPI (no collections) --------
+    - name: Get Infoblox networks (CIDRs)
+      ansible.builtin.uri:
+        url: "{{ infoblox_host }}/wapi/v{{ infoblox_wapi_version }}/network?_return_fields=network&*_max_results=10000"
+        user: "{{ infoblox_username }}"
+        password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
+      register: ib_networks
 
-    - name: Get fixed addresses (static IPs) from Infoblox
-      infoblox.nios_modules.nios_facts:
-        gather_subset:
-          - fixed_address
-        provider:
-          host: "{{ infoblox_host }}"
-          username: "{{ infoblox_username }}"
-          password: "{{ infoblox_password }}"
-          wapi_version: "{{ infoblox_wapi_version }}"
-          ssl_verify: "{{ infoblox_verify_ssl }}"
+    - name: Get Infoblox fixed addresses (static IPs)
+      ansible.builtin.uri:
+        url: "{{ infoblox_host }}/wapi/v{{ infoblox_wapi_version }}/fixedaddress?_return_fields=ip_address,name&*_max_results=10000"
+        user: "{{ infoblox_username }}"
+        password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
       register: ib_fixed
 
-    # -------- Read from NetBox via REST (GET) --------
+    # -------- Read from NetBox REST --------
     - name: Get NetBox prefixes (all)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/?limit=0"
@@ -93,10 +90,10 @@
         return_content: true
       register: nb_ips
 
-    # -------- Normalize data lists --------
+    # -------- Normalize lists --------
     - name: Build Infoblox network list (CIDRs)
       ansible.builtin.set_fact:
-        ib_network_list: "{{ ib_facts.nios_facts.network | map(attribute='network') | list | default([]) }}"
+        ib_network_list: "{{ ib_networks.json | map(attribute='network') | list | default([]) }}"
 
     - name: Build NetBox prefix list (CIDRs)
       ansible.builtin.set_fact:
@@ -104,13 +101,13 @@
 
     - name: Build Infoblox fixed IP list
       ansible.builtin.set_fact:
-        ib_ip_list: "{{ ib_fixed.nios_facts.fixed_address | map(attribute='ip_address') | list | default([]) }}"
+        ib_ip_list: "{{ ib_fixed.json | map(attribute='ip_address') | list | default([]) }}"
 
     - name: Build NetBox IP list (strip CIDR mask)
       ansible.builtin.set_fact:
         nb_ip_list: "{{ (nb_ips.json.results | map(attribute='address') | map('regex_replace','/\\d+$','') | list) | default([]) }}"
 
-    # -------- Drift detection (data mismatch) --------
+    # -------- Drift detection --------
     - name: Compute network drift
       ansible.builtin.set_fact:
         drift_networks_missing_in_nb: "{{ ib_network_list | difference(nb_prefix_list) }}"
@@ -139,29 +136,33 @@
           'ips_extra_in_netbox': drift_ips_extra_in_nb
         } | to_nice_json }}"
 
-    # -------- Optional remediation (create missing in NetBox) --------
+    # -------- Optional remediation (create missing in NetBox via REST) --------
     - name: Create missing prefixes in NetBox (optional)
-      netbox.netbox.netbox_prefix:
-        netbox_url: "{{ netbox_url }}"
-        netbox_token: "{{ netbox_token }}"
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/"
+        headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
-        data:
+        method: POST
+        body_format: json
+        body:
           prefix: "{{ item }}"
           status: "active"
           description: "Imported from Infoblox"
-        state: present
+        status_code: [201]   # created
       loop: "{{ drift_networks_missing_in_nb }}"
       when: remediate_prefixes | default(false)
 
     - name: Create missing IPs in NetBox (optional)
-      netbox.netbox.netbox_ip_address:
-        netbox_url: "{{ netbox_url }}"
-        netbox_token: "{{ netbox_token }}"
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/"
+        headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
-        data:
+        method: POST
+        body_format: json
+        body:
           address: "{{ item }}/32"
           status: "active"
           description: "Imported from Infoblox (fixed-address)"
-        state: present
+        status_code: [201]   # created
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
