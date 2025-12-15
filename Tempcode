@@ -7,7 +7,6 @@ curl -I \
   http://172.17.228.82:8000/api/
 
 
-
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -21,7 +20,7 @@ curl -I \
 
   tasks:
     # -------- NetBox readiness (token required) --------
-    - name: Probe NetBox API root (readiness)
+    - name: Probe NetBox API root (readiness + version header)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/"
         headers: "{{ nb_headers }}"
@@ -40,30 +39,22 @@ curl -I \
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
-    # -------- Optional: NetBox version drift check via schema --------
-    - name: Read NetBox OpenAPI schema (optional version check)
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/schema/"   # trailing slash is required
-        headers: "{{ nb_headers }}"
-        validate_certs: "{{ netbox_verify_ssl }}"
-        method: GET
-        return_content: true
-        status_code: [200]
-        timeout: 60
-        follow_redirects: all
-        use_proxy: no
-      register: nb_schema
-      ignore_errors: true
-
-    - name: Enforce minimum NetBox version (if schema loaded)
+    # Enforce minimum NetBox version using the API-Version header.
+    # Be robust to header casing: try 'api-version' first, then 'API-Version'.
+    - name: Enforce minimum NetBox version from API root header
+      vars:
+        nb_api_version: "{{ nb_root.headers.get('api-version', nb_root.headers.get('API-Version', '0.0.0')) }}"
       ansible.builtin.assert:
         that:
-          - nb_schema.status == 200
-          - nb_schema.json.info.version is version(min_netbox_version, '>=')
+          - nb_api_version is version(min_netbox_version, '>=')
         fail_msg: >-
-          NetBox version too old: got {{ nb_schema.json.info.version | default('unknown') }},
+          NetBox version too old: got {{ nb_api_version | default('unknown') }},
           need >= {{ min_netbox_version }}.
-      when: nb_schema is defined and nb_schema.status == 200
+
+    # (Optional) show what version we evaluated
+    - name: Debug NetBox version header
+      ansible.builtin.debug:
+        msg: "NetBox API-Version header = {{ nb_root.headers.get('api-version', nb_root.headers.get('API-Version', 'unknown')) }}"
 
     # -------- Read from Infoblox WAPI (no collections) --------
     - name: Get Infoblox networks (CIDRs)
@@ -201,3 +192,4 @@ curl -I \
         use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
+
