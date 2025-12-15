@@ -7,6 +7,7 @@ curl -I \
   http://172.17.228.82:8000/api/
 
 
+
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -40,10 +41,10 @@ curl -I \
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
     # Enforce minimum NetBox version using the API-Version header.
-    # Be robust to header casing: try 'api-version' first, then 'API-Version'.
+    # NOTE: uri module maps headers to fields (lowercase, hyphen→underscore).
     - name: Enforce minimum NetBox version from API root header
       vars:
-        nb_api_version: "{{ nb_root.headers.get('api-version', nb_root.headers.get('API-Version', '0.0.0')) }}"
+        nb_api_version: "{{ nb_root.api_version | default('0.0.0') }}"
       ansible.builtin.assert:
         that:
           - nb_api_version is version(min_netbox_version, '>=')
@@ -51,10 +52,9 @@ curl -I \
           NetBox version too old: got {{ nb_api_version | default('unknown') }},
           need >= {{ min_netbox_version }}.
 
-    # (Optional) show what version we evaluated
-    - name: Debug NetBox version header
+    - name: Show parsed NetBox API-Version header
       ansible.builtin.debug:
-        msg: "NetBox API-Version header = {{ nb_root.headers.get('api-version', nb_root.headers.get('API-Version', 'unknown')) }}"
+        msg: "NetBox API-Version = {{ nb_root.api_version | default('missing') }}"
 
     # -------- Read from Infoblox WAPI (no collections) --------
     - name: Get Infoblox networks (CIDRs)
@@ -192,4 +192,3 @@ curl -I \
         use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
-
