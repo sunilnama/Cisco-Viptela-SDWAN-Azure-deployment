@@ -20,9 +20,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 
-
-
-
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -30,8 +27,10 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
   connection: local
 
   vars:
-    # Use WAPI v2.11 for NIOS 8.5.x (override in group_vars if you need 2.11.1)
-    ib_wapi_version_resolved: "{{ infoblox_wapi_version | default('2.11') }}"
+    # Normalize Infoblox host (remove trailing slashes) and WAPI version (remove leading 'v')
+    ib_host: "{{ infoblox_host | regex_replace('/+$','') }}"
+    ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v','') }}"
+    ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
 
     # NetBox request headers (token required for /api/*)
     nb_headers:
@@ -39,7 +38,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       Content-Type: "application/json"
 
     # Tunables for Infoblox paging/limits
-    ib_safe_max_results: 500   # lower value to avoid grid limits
+    ib_safe_max_results: 500
     ib_paging_enabled: true
 
   tasks:
@@ -61,68 +60,92 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
     - name: Assert NetBox API is reachable
       ansible.builtin.assert:
-        that:
-          - nb_root.status == 200
+        that: [ "nb_root.status == 200" ]
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
-        nb_api_version_semver: >-
-          {{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}
+        nb_api_version_semver: "{{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}"
 
     - name: Enforce minimum NetBox version (normalized semver)
       vars:
-        min_nb_semver: >-
-          {{ min_netbox_version ~ ('.0' if (min_netbox_version.split('.') | length == 2) else '') }}
+        min_nb_semver: "{{ min_netbox_version ~ ('.0' if (min_netbox_version.split('.') | length == 2) else '') }}"
       ansible.builtin.assert:
-        that:
-          - nb_api_version_semver is version(min_nb_semver, '>=')
-        fail_msg: >-
-          NetBox version too old: got {{ nb_api_version_semver }}, need >= {{ min_nb_semver }}.
+        that: [ "nb_api_version_semver is version(min_nb_semver, '>=')" ]
+        fail_msg: "NetBox version too old: got {{ nb_api_version_semver }}, need >= {{ min_nb_semver }}."
 
     - name: Show parsed NetBox API-Version header
       ansible.builtin.debug:
         msg: "NetBox API-Version = {{ nb_root.api_version | default('missing') }} (normalized: {{ nb_api_version_semver }})"
 
     ###########################################################################
+    # Infoblox WAPI preflight (print and probe the exact URL we will use)
+    ###########################################################################
+    - name: Show WAPI network schema URL
+      ansible.builtin.debug:
+        msg: "Probing WAPI schema at {{ ib_base }}/network?_schema"
+
+    - name: Probe WAPI network schema (no redirects)
+      ansible.builtin.uri:
+        url: "{{ ib_base }}/network?_schema"
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200, 401]     # 401 still proves endpoint exists
+        timeout: 30
+        follow_redirects: none       # critical: do not follow redirects
+        use_proxy: no
+      register: ib_net_schema
+
+    - name: Assert WAPI network schema responded
+      ansible.builtin.assert:
+        that:
+          - ib_net_schema.status in [200, 401]
+        fail_msg: >-
+          WAPI network schema probe failed at {{ ib_base }}/network?_schema
+          Status={{ ib_net_schema.status }}. If you see 'Unknown WAPI version', re-check infoblox_wapi_version and infoblox_host.
+
+    ###########################################################################
     # Read from Infoblox WAPI (networks) with safe _max_results and paging fallback
     ###########################################################################
     - block:
-        - name: Get Infoblox networks (CIDRs) with safe _max_results
+        - name: Get Infoblox networks (CIDRs) with safe _max_results (no redirects)
           ansible.builtin.uri:
-            url: "{{ infoblox_host }}/wapi/v{{ ib_wapi_version_resolved }}/network?_return_fields=network&_max_results={{ ib_safe_max_results }}"
-            headers:
-              Accept: "application/json"
-            user: "{{ infoblox_username }}"
-            password: "{{ infoblox_password }}"
+            url: "{{ ib_base }}/network?_return_fields=network&_max_results={{ ib_safe_max_results }}"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
             force_basic_auth: true
             validate_certs: "{{ infoblox_verify_ssl }}"
             method: GET
             return_content: true
+            status_code: [200]
             timeout: 60
-            follow_redirects: none        # <<< do not follow redirects
+            follow_redirects: none
             use_proxy: no
           register: ib_networks
-          failed_when: ib_networks.status != 200
 
       rescue:
         - name: Show WAPI error body (networks first attempt)
           ansible.builtin.debug:
             msg: "Infoblox networks failed ({{ ib_networks.status | default('unknown') }}): {{ ib_networks.content | default('no body returned') }}"
 
-        - name: Get Infoblox networks with paging enabled (first page)
+        - name: Get Infoblox networks with paging enabled (first page) (no redirects)
           ansible.builtin.uri:
-            url: "{{ infoblox_host }}/wapi/v{{ ib_wapi_version_resolved }}/network?_return_fields=network&_paging=1&_max_results={{ ib_safe_max_results }}"
-            headers:
-              Accept: "application/json"
-            user: "{{ infoblox_username }}"
-            password: "{{ infoblox_password }}"
+            url: "{{ ib_base }}/network?_return_fields=network&_paging=1&_max_results={{ ib_safe_max_results }}"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
             force_basic_auth: true
             validate_certs: "{{ infoblox_verify_ssl }}"
             method: GET
             return_content: true
+            status_code: [200]
             timeout: 60
-            follow_redirects: none        # <<< do not follow redirects
+            follow_redirects: none
             use_proxy: no
           register: ib_net_page1
 
@@ -131,19 +154,19 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
             ib_network_pages: "{{ ib_net_page1.json.result | default(ib_net_page1.json | default([])) }}"
             ib_next_page_id: "{{ ib_net_page1.json.next_page_id | default('') }}"
 
-        - name: Fetch additional pages while next_page_id exists
+        - name: Fetch subsequent pages while next_page_id exists (no redirects)
           ansible.builtin.uri:
-            url: "{{ infoblox_host }}/wapi/v{{ ib_wapi_version_resolved }}/network?_return_fields=network&_paging=1&_page_id={{ ib_next_page_id }}"
-            headers:
-              Accept: "application/json"
-            user: "{{ infoblox_username }}"
-            password: "{{ infoblox_password }}"
+            url: "{{ ib_base }}/network?_return_fields=network&_paging=1&_page_id={{ ib_next_page_id }}"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
             force_basic_auth: true
             validate_certs: "{{ infoblox_verify_ssl }}"
             method: GET
             return_content: true
+            status_code: [200]
             timeout: 60
-            follow_redirects: none        # <<< do not follow redirects
+            follow_redirects: none
             use_proxy: no
           register: ib_net_pageN
           when: ib_next_page_id != ''
@@ -167,41 +190,40 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
     # Read from Infoblox WAPI (fixed addresses) with same strategy
     ###########################################################################
     - block:
-        - name: Get Infoblox fixed addresses (static IPs) with safe _max_results
+        - name: Get Infoblox fixed addresses (static IPs) with safe _max_results (no redirects)
           ansible.builtin.uri:
-            url: "{{ infoblox_host }}/wapi/v{{ ib_wapi_version_resolved }}/fixedaddress?_return_fields=ip_address,name&_max_results={{ ib_safe_max_results }}"
-            headers:
-              Accept: "application/json"
-            user: "{{ infoblox_username }}"
-            password: "{{ infoblox_password }}"
+            url: "{{ ib_base }}/fixedaddress?_return_fields=ip_address,name&_max_results={{ ib_safe_max_results }}"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
             force_basic_auth: true
             validate_certs: "{{ infoblox_verify_ssl }}"
             method: GET
             return_content: true
+            status_code: [200]
             timeout: 60
-            follow_redirects: none        # <<< do not follow redirects
+            follow_redirects: none
             use_proxy: no
           register: ib_fixed
-          failed_when: ib_fixed.status != 200
 
       rescue:
         - name: Show WAPI error body (fixedaddress first attempt)
           ansible.builtin.debug:
             msg: "Infoblox fixedaddress failed ({{ ib_fixed.status | default('unknown') }}): {{ ib_fixed.content | default('no body returned') }}"
 
-        - name: Get Infoblox fixed addresses with paging enabled (first page)
+        - name: Get Infoblox fixed addresses with paging enabled (first page) (no redirects)
           ansible.builtin.uri:
-            url: "{{ infoblox_host }}/wapi/v{{ ib_wapi_version_resolved }}/fixedaddress?_return_fields=ip_address,name&_paging=1&_max_results={{ ib_safe_max_results }}"
-            headers:
-              Accept: "application/json"
-            user: "{{ infoblox_username }}"
-            password: "{{ infoblox_password }}"
+            url: "{{ ib_base }}/fixedaddress?_return_fields=ip_address,name&_paging=1&_max_results={{ ib_safe_max_results }}"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
             force_basic_auth: true
             validate_certs: "{{ infoblox_verify_ssl }}"
             method: GET
             return_content: true
+            status_code: [200]
             timeout: 60
-            follow_redirects: none        # <<< do not follow redirects
+            follow_redirects: none
             use_proxy: no
           register: ib_fix_page1
 
@@ -210,19 +232,19 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
             ib_fixed_pages: "{{ ib_fix_page1.json.result | default(ib_fix_page1.json | default([])) }}"
             ib_next_fix_page_id: "{{ ib_fix_page1.json.next_page_id | default('') }}"
 
-        - name: Fetch additional pages while next_page_id exists (fixedaddress)
+        - name: Fetch subsequent pages while next_page_id exists (fixedaddress) (no redirects)
           ansible.builtin.uri:
-            url: "{{ infoblox_host }}/wapi/v{{ ib_wapi_version_resolved }}/fixedaddress?_return_fields=ip_address,name&_paging=1&_page_id={{ ib_next_fix_page_id }}"
-            headers:
-              Accept: "application/json"
-            user: "{{ infoblox_username }}"
-            password: "{{ infoblox_password }}"
+            url: "{{ ib_base }}/fixedaddress?_return_fields=ip_address,name&_paging=1&_page_id={{ ib_next_fix_page_id }}"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
             force_basic_auth: true
             validate_certs: "{{ infoblox_verify_ssl }}"
             method: GET
             return_content: true
+            status_code: [200]
             timeout: 60
-            follow_redirects: none        # <<< do not follow redirects
+            follow_redirects: none
             use_proxy: no
           register: ib_fix_pageN
           when: ib_next_fix_page_id != ''
@@ -354,4 +376,5 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
+
 
