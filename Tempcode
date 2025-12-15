@@ -17,8 +17,6 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
 
 
 
-
-
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -26,25 +24,17 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
   connection: local
 
   vars:
+    # >>> Set your WAPI version here (matches NIOS 8.5.x) <<<
+    ib_wapi_version_resolved: "{{ infoblox_wapi_version | default('2.11') }}"
+
     # NetBox request headers (token required for /api/*)
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
     # Tunables for Infoblox paging/limits
-    ib_safe_max_results: 500     # lower value to avoid grid limits
+    ib_safe_max_results: 500   # lower value to avoid grid limits
     ib_paging_enabled: true
-
-    # Candidate WAPI versions to probe (first supported wins).
-    # If you already know your version, set infoblox_wapi_version in group_vars to a single value.
-    ib_wapi_candidates_default:
-      - "2.14.1"
-      - "2.14"
-      - "2.13.7"
-      - "2.13"
-      - "2.12"
-      - "2.11"
-      - "2.10"
 
   tasks:
     ###########################################################################
@@ -69,7 +59,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
-    # Normalize 'API-Version' header (nb_root.api_version) to X.Y.Z
+    # Normalize 'API-Version' header (nb_root.api_version) to X.Y.Z for comparison
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
         nb_api_version_semver: >-
@@ -89,49 +79,6 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
     - name: Show parsed NetBox API-Version header
       ansible.builtin.debug:
         msg: "NetBox API-Version = {{ nb_root.api_version | default('missing') }} (normalized: {{ nb_api_version_semver }})"
-
-    ###########################################################################
-    # Resolve Infoblox WAPI version dynamically
-    ###########################################################################
-    - name: Build WAPI versions list to probe
-      ansible.builtin.set_fact:
-        ib_wapi_candidates: >-
-          {{ (infoblox_wapi_version | default('')) | ternary([infoblox_wapi_version], ib_wapi_candidates_default) }}
-
-    - name: Probe Infoblox WAPI 'network' schema for each candidate
-      ansible.builtin.uri:
-        url: "{{ infoblox_host }}/wapi/v{{ item }}/network?_schema"
-        user: "{{ infoblox_username }}"
-        password: "{{ infoblox_password }}"
-        force_basic_auth: true
-        validate_certs: "{{ infoblox_verify_ssl }}"
-        method: GET
-        return_content: true
-        status_code: [200, 401]   # 401 still proves endpoint exists
-        timeout: 20
-        use_proxy: no
-      loop: "{{ ib_wapi_candidates }}"
-      register: ib_probe
-      failed_when: false
-
-    - name: Resolve supported WAPI version
-      ansible.builtin.set_fact:
-        ib_wapi_version_resolved: >-
-          {{ (ib_probe.results
-              | selectattr('status','in',[200,401])
-              | map(attribute='item') | list | first) | default('') }}
-
-    - name: Assert we found a supported WAPI version
-      ansible.builtin.assert:
-        that:
-          - ib_wapi_version_resolved | length > 0
-        fail_msg: >-
-          Could not resolve any supported Infoblox WAPI version from candidates={{ ib_wapi_candidates }}.
-          Try hitting {{ infoblox_host }}/wapi/ (no version) to list supported versions, then set infoblox_wapi_version.
-
-    - name: Show resolved WAPI version
-      ansible.builtin.debug:
-        msg: "Using Infoblox WAPI v{{ ib_wapi_version_resolved }}"
 
     ###########################################################################
     # Read from Infoblox WAPI (networks) with safe _max_results and paging fallback
@@ -157,7 +104,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
       rescue:
         - name: Show WAPI error body (networks first attempt)
           ansible.builtin.debug:
-            msg: "Infoblox networks request failed ({{ ib_networks.status | default('unknown') }}): {{ ib_networks.content | default('no body returned') }}"
+            msg: "Infoblox networks failed ({{ ib_networks.status | default('unknown') }}): {{ ib_networks.content | default('no body returned') }}"
 
         - name: Get Infoblox networks with paging enabled (first page)
           ansible.builtin.uri:
@@ -234,7 +181,7 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
       rescue:
         - name: Show WAPI error body (fixedaddress first attempt)
           ansible.builtin.debug:
-            msg: "Infoblox fixedaddress request failed ({{ ib_fixed.status | default('unknown') }}): {{ ib_fixed.content | default('no body returned') }}"
+            msg: "Infoblox fixedaddress failed ({{ ib_fixed.status | default('unknown') }}): {{ ib_fixed.content | default('no body returned') }}"
 
         - name: Get Infoblox fixed addresses with paging enabled (first page)
           ansible.builtin.uri:
@@ -399,4 +346,5 @@ curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_sch
         use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: remediate_ips | default(false)
+
 
