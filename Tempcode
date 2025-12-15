@@ -20,8 +20,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 
-
-
 ---
 - name: Sync Infoblox IPAM data to NetBox (collection-free; version & data drift checks)
   hosts: localhost
@@ -34,12 +32,12 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
     ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v','') }}"
     ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
 
-    # NetBox request headers (token required for /api/*)
+    # NetBox request headers (token required)
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
-    # Tunables for Infoblox paging/limits
+    # WAPI paging/limit
     ib_safe_max_results: 500
 
   tasks:
@@ -65,13 +63,16 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
+    # >>> Define both semver vars as facts (persist for following tasks)
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
         nb_api_version_semver: "{{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}"
 
-    - name: Enforce minimum NetBox version (normalized semver)
-      vars:
+    - name: Normalize baseline (min_netbox_version) to semver (X.Y.Z)
+      ansible.builtin.set_fact:
         min_nb_semver: "{{ min_netbox_version ~ ('.0' if (min_netbox_version.split('.') | length == 2) else '') }}"
+
+    - name: Enforce minimum NetBox version (normalized semver)
       ansible.builtin.assert:
         that:
           - nb_api_version_semver is version(min_nb_semver, '>=')
@@ -138,7 +139,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         follow_redirects: none
         use_proxy: no
       register: ib_fixed
-      # fixedaddress requires 'ipv4addr' field (not 'ip_address') per WAPI docs.  # [2](https://tutorialreference.com/python/examples/faq/python-error-ssl-sslerror-ssl-wrong-version-number)
+      # 'fixedaddress' field is ipv4addr, not ip_address. [2](https://tutorialreference.com/python/examples/faq/python-error-ssl-sslerror-ssl-wrong-version-number)
 
     ###########################################################################
     # NetBox reads & drift detection
@@ -223,7 +224,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         label: "{{ item }}"
       register: nb_prefix_checks
 
-    - name: Create prefixes that truly do not exist (expect 201; mark change; show errors)
+    - name: Create prefixes that truly do not exist (expect 201; show response)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/"
         headers: "{{ nb_headers }}"
@@ -246,11 +247,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
          | map(attribute='json') | map(attribute='count') | list | first | int) == 0
       register: nb_prefix_creates
 
-    - name: Mark changes for created prefixes (201)
-      ansible.builtin.set_fact:
-        nb_prefix_changes: "{{ (nb_prefix_creates.results | selectattr('status','equalto', 201) | list) | length if nb_prefix_creates is defined else 0 }}"
-
-    - name: Show creation results
+    - name: Show creation results (IDs or error bodies)
       ansible.builtin.debug:
         msg: >-
           {% if nb_prefix_creates is defined %}
@@ -277,7 +274,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       loop: "{{ drift_ips_missing_in_nb }}"
       register: nb_ip_checks
 
-    - name: Create IP addresses that do not exist (expect 201; show errors)
+    - name: Create IP addresses that do not exist (expect 201; show response)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/ip-addresses/"
         headers: "{{ nb_headers }}"
@@ -291,7 +288,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         return_content: true
         timeout: 60
         follow_redirects: all
-        use_proxy: no
       loop: "{{ drift_ips_missing_in_nb }}"
       when: >
         (nb_ip_checks.results | selectattr('item','equalto', item)
@@ -307,6 +303,7 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
           {% else %}
           No IPs were posted (all existed or checks failed).
           {% endif %}
+
 
 
 
