@@ -1,10 +1,12 @@
 
 ---
 - name: Sync Infoblox IPAM data to NetBox (with version & data drift checks)
-  hosts: local
+  hosts: localhost
   gather_facts: false
+  connection: local
 
   vars:
+    # NetBox REST headers
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
@@ -47,27 +49,29 @@
           Infoblox WAPI v{{ infoblox_wapi_version }} not reachable (status={{ ib_wapi_probe.status }}).
           Check WAPI version and credentials.
 
-    # -------- Read from Infoblox (community.general.infoblox_get) --------
+    # -------- Read from Infoblox (Infoblox collection) --------
     - name: Get networks (CIDRs) from Infoblox
-      community.general.infoblox_get:
-        host: "{{ infoblox_host }}"
-        username: "{{ infoblox_username }}"
-        password: "{{ infoblox_password }}"
-        wapi_version: "v{{ infoblox_wapi_version }}"
-        object_type: "network"
-        filters: {}                             # fetch all networks
-        verify_ssl: "{{ infoblox_verify_ssl }}"
-      register: ib_networks
+      infoblox.nios_modules.nios_facts:
+        gather_subset:
+          - network
+        provider:
+          host: "{{ infoblox_host }}"
+          username: "{{ infoblox_username }}"
+          password: "{{ infoblox_password }}"
+          wapi_version: "{{ infoblox_wapi_version }}"
+          ssl_verify: "{{ infoblox_verify_ssl }}"
+      register: ib_facts
 
     - name: Get fixed addresses (static IPs) from Infoblox
-      community.general.infoblox_get:
-        host: "{{ infoblox_host }}"
-        username: "{{ infoblox_username }}"
-        password: "{{ infoblox_password }}"
-        wapi_version: "v{{ infoblox_wapi_version }}"
-        object_type: "fixedaddress"
-        filters: {}                             # fetch all fixed-address reservations
-        verify_ssl: "{{ infoblox_verify_ssl }}"
+      infoblox.nios_modules.nios_facts:
+        gather_subset:
+          - fixed_address
+        provider:
+          host: "{{ infoblox_host }}"
+          username: "{{ infoblox_username }}"
+          password: "{{ infoblox_password }}"
+          wapi_version: "{{ infoblox_wapi_version }}"
+          ssl_verify: "{{ infoblox_verify_ssl }}"
       register: ib_fixed
 
     # -------- Read from NetBox via REST (GET) --------
@@ -92,7 +96,7 @@
     # -------- Normalize data lists --------
     - name: Build Infoblox network list (CIDRs)
       ansible.builtin.set_fact:
-        ib_network_list: "{{ ib_networks.objects | map(attribute='network') | list | default([]) }}"
+        ib_network_list: "{{ ib_facts.nios_facts.network | map(attribute='network') | list | default([]) }}"
 
     - name: Build NetBox prefix list (CIDRs)
       ansible.builtin.set_fact:
@@ -100,7 +104,7 @@
 
     - name: Build Infoblox fixed IP list
       ansible.builtin.set_fact:
-        ib_ip_list: "{{ ib_fixed.objects | map(attribute='ip_address') | list | default([]) }}"
+        ib_ip_list: "{{ ib_fixed.nios_facts.fixed_address | map(attribute='ip_address') | list | default([]) }}"
 
     - name: Build NetBox IP list (strip CIDR mask)
       ansible.builtin.set_fact:
@@ -160,3 +164,4 @@
           description: "Imported from Infoblox (fixed-address)"
         state: present
       loop: "{{ drift_ips_missing_in_nb }}"
+      when: remediate_ips | default(false)
