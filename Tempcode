@@ -1,4 +1,3 @@
-
 ---
 - name: Sync Infoblox → NetBox (create, delete, and map Prefix ↔ VLAN) + diagnostics
   hosts: localhost
@@ -282,8 +281,6 @@
           'vlan_name': (item.0.name | default(''))
         } ] }}"
       vars:
-        # assigned_to items may be plain strings like "network/.../CIDR/default"
-        # OR dicts with 'network'/'ipv6network'
         ref_to_use: >-
           {{ item.1 if (item.1 is string)
              else (item.1.network | default(item.1.ipv6network | default(''))) }}
@@ -317,11 +314,9 @@
         msg: "{{ ib_vlan_assigned_cidrs.results | default([]) | list | json_query('[0:5]') }}"
       when: run_debug | default(true)
 
-    # ---- FIXED MERGE: use item.item.vid from registered loop results (no loop.index0) ----
-    - name: Merge CIDRs into ib_net_vlan_map (CIDR → vid)
+    - name: Merge CIDRs into ib_net_vlan_map (CIDR → vid)  # uses item.item.vid, not loop.index0
       ansible.builtin.set_fact:
-        ib_net_vlan_map: "{{ (ib_net_vlan_map | default({})) 
-                             | combine({ (item.json.network): (item.item.vid) }) }}"
+        ib_net_vlan_map: "{{ (ib_net_vlan_map | default({})) | combine({ (item.json.network): (item.item.vid) }) }}"
       loop: "{{ ib_vlan_assigned_cidrs.results | default([]) }}"
       when:
         - item.json is defined
@@ -431,8 +426,7 @@
         timeout: 30
       vars:
         nb_vlan_pk: >-
-          {{
-            (
+          {{ (
               nb_vlan_lookup_pairs.results
               | selectattr('item.vid','equalto', item.vid)
               | map(attribute='json')
@@ -446,8 +440,7 @@
             | default(0)
           }}
         nb_prefix_id: >-
-          {{
-            (
+          {{ (
               nb_prefix_lookup_pairs.results
               | selectattr('item.network','equalto', item.network)
               | map(attribute='json')
@@ -471,4 +464,4 @@
         msg:
           - "Pairs considered: {{ ib_net_vlan_pairs | length }}"
           - "Patched: {{ (nb_prefix_vlan_patches.results | selectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
-          - "Failures: {{ (nb_prefix_vlan_patches.results | rejectattr('status','equalto
+          - "Failures: {{ (nb_prefix_vlan_patches.results | rejectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
