@@ -134,7 +134,7 @@
         ib_network_list: "{{ ib_networks.json | map(attribute='network') | list | default([]) }}"
         ib_ip_list: "{{ ib_fixed.json | map(attribute='ipv4addr') | list | default([]) }}"
 
-    - name: Build NetBox lists
+    - name: Get NetBox prefixes (all)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/?limit=0"
         headers: "{{ nb_headers }}"
@@ -246,7 +246,7 @@
     - name: Check if VLAN exists in NetBox by vid (optional site)
       ansible.builtin.uri:
         url: >-
-          {{ netbox_url }}/api/ipam/vlans/?vid={{ item.vid }}
+          {{ netbox_url }}/api/ipam/vlans/?vid={{ item.id | int }}
           {% if netbox_vlan_site is defined and netbox_vlan_site|length > 0 %}
           &site={{ netbox_vlan_site | urlencode }}
           {% endif %}
@@ -297,10 +297,6 @@
       loop: "{{ ib_vlans.json | default([]) | subelements('assigned_to', skip_missing=True) }}"
       when: ref_to_use | length > 0
 
-    - name: Debug VLAN→network refs (first 10)
-      ansible.builtin.debug:
-        msg: "{{ ib_vlan_net_refs | default([]) | slice(0,10) }}"
-
     - name: Fetch CIDR for each assigned ref
       ansible.builtin.uri:
         url: "{{ ib_base }}/{{ item.ref }}?_return_fields=network"
@@ -316,8 +312,6 @@
         follow_redirects: none
         use_proxy: no
       loop: "{{ ib_vlan_net_refs | default([]) }}"
-      loop_control:
-        label: "{{ item.ref }}"
       register: ib_vlan_assigned_cidrs
 
     - name: Merge CIDRs into ib_net_vlan_map (CIDR → vid)
@@ -328,12 +322,6 @@
         - item.json is defined
         - item.json.network is defined
 
-    - name: Debug network→vlan map size
-      ansible.builtin.debug:
-        msg:
-          - "ib_net_vlan_map length: {{ (ib_net_vlan_map | default({})) | length }}"
-          - "ib_net_vlan_map sample: {{ (ib_net_vlan_map | default({})) | dict2items | slice(0,5) }}"
-
     - name: Initialize pairs list for prefix→vlan patch
       ansible.builtin.set_fact:
         ib_net_vlan_pairs: []
@@ -343,10 +331,6 @@
         ib_net_vlan_pairs: "{{ ib_net_vlan_pairs + [ {'network': item.key, 'vid': item.value} ] }}"
       loop: "{{ (ib_net_vlan_map | default({})) | dict2items }}"
       when: (ib_net_vlan_map | default({})) | length > 0
-
-    - name: Debug pairs (first 10)
-      ansible.builtin.debug:
-        msg: "{{ ib_net_vlan_pairs | default([]) | slice(0,10) }}"
 
     ###########################################################################
     # PATCH: set NetBox prefix.vlan (use VLAN PK id)
@@ -365,9 +349,6 @@
         status_code: [200]
         timeout: 30
       loop: "{{ ib_net_vlan_pairs | default([]) }}"
-      loop_control:
-        label: "VID={{ item.vid }}"
-      when: patch_prefix_vlan | default(true)
       register: nb_vlan_lookup_pairs
 
     - name: Lookup NetBox Prefix by CIDR
@@ -380,9 +361,6 @@
         status_code: [200]
         timeout: 30
       loop: "{{ ib_net_vlan_pairs | default([]) }}"
-      loop_control:
-        label: "prefix={{ item.network }}"
-      when: patch_prefix_vlan | default(true)
       register: nb_prefix_lookup_pairs
 
     - name: Assert VLAN lookup unique
@@ -393,7 +371,6 @@
           VLAN GET for vid={{ item.item.vid }} returned {{ item.json.count | int }} results.
           Constrain by site (netbox_vlan_site) or verify VLAN presence.
       loop: "{{ nb_vlan_lookup_pairs.results | default([]) }}"
-      when: patch_prefix_vlan | default(true)
 
     - name: Assert Prefix lookup unique
       ansible.builtin.assert:
@@ -403,11 +380,10 @@
           Prefix GET for {{ item.item.network }} returned {{ item.json.count | int }} results.
           Ensure the prefix exists and is unique.
       loop: "{{ nb_prefix_lookup_pairs.results | default([]) }}"
-      when: patch_prefix_vlan | default(true)
 
     - name: PATCH prefix → set VLAN (use VLAN PK id) and description
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix_id }}/"
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix_id }}"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: PATCH
@@ -440,10 +416,7 @@
               | default([])
             ) | map(attribute='id') | first | default('') }}
       loop: "{{ ib_net_vlan_pairs | default([]) }}"
-      loop_control:
-        label: "{{ item.network }} → vid={{ item.vid }}"
       when:
-        - patch_prefix_vlan | default(true)
         - nb_vlan_pk | int > 0
         - nb_prefix_id | length > 0
       register: nb_prefix_vlan_patches
