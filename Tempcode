@@ -1,5 +1,5 @@
 ---
-- name: Sync Infoblox → NetBox (create, delete, and map Prefix ↔ VLAN) + built-in diagnostics
+- name: Sync Infoblox → NetBox (create, delete, and map Prefix ↔ VLAN) + improved diagnostics
   hosts: localhost
   gather_facts: false
   connection: local
@@ -294,9 +294,23 @@
       ansible.builtin.set_fact:
         ib_vlan_net_refs: []
 
+    - name: Compute VLANs that have assigned_to
+      ansible.builtin.set_fact:
+        ib_vlans_assigned: >-
+          {{ ib_vlans.json | default([])
+             | selectattr('assigned_to','defined')
+             | selectattr('assigned_to','ne', [])
+             | list }}
+      when: run_debug | default(true)
+
+    - name: DEBUG | First 5 VLANs with assignments (raw)
+      ansible.builtin.debug:
+        msg: "{{ ib_vlans_assigned | list | json_query('[0:5]') }}"
+      when: run_debug | default(true)
+
     - name: Collect {ref, vid} from VLAN.assigned_to
       ansible.builtin.set_fact:
-        ib_vlan_net_refs: "{{ (ib_vlan_net_refs | default([])) + [ {'ref': ref_to_use, 'vid': (item.0.id | int)} ] }}"
+        ib_vlan_net_refs: "{{ (ib_vlan_net_refs | default([])) + [ {'ref': ref_to_use, 'vid': (item.0.id | int), 'vlan_name': (item.0.name | default('')) } ] }}"
       vars:
         ref_to_use: "{{ item.1.network | default(item.1.ipv6network | default('')) }}"
       loop: "{{ ib_vlans.json | default([]) | subelements('assigned_to', skip_missing=True) }}"
@@ -304,7 +318,7 @@
 
     - name: DEBUG | ib_vlan_net_refs (first few entries)
       ansible.builtin.debug:
-        msg: "{{ ib_vlan_net_refs | default([]) | slice(0,10) }}"
+        msg: "{{ ib_vlan_net_refs | list | json_query('[0:10]') }}"
       when: run_debug | default(true)
 
     - name: Fetch CIDR for each assigned ref
@@ -334,7 +348,7 @@
 
     - name: DEBUG | ib_net_vlan_map sample
       ansible.builtin.debug:
-        msg: "{{ (ib_net_vlan_map | default({})) | dict2items | slice(0,10) }}"
+        msg: "{{ (ib_net_vlan_map | default({})) | dict2items | list | json_query('[0:10]') }}"
       when: run_debug | default(true)
 
     - name: Initialize pairs list for prefix→vlan patch
@@ -349,7 +363,7 @@
 
     - name: DEBUG | first 10 pairs
       ansible.builtin.debug:
-        msg: "{{ ib_net_vlan_pairs | default([]) | slice(0,10) }}"
+        msg: "{{ ib_net_vlan_pairs | list | json_query('[0:10]') }}"
       when: run_debug | default(true)
 
     ###########################################################################
