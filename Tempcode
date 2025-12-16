@@ -56,9 +56,9 @@
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
-    - name: Extract NetBox API version from headers
+    - name: Extract NetBox API version from headers (if exposed)
       ansible.builtin.set_fact:
-        nb_api_version_raw: "{{ (nb_root.headers | default({}))['API-Version'] | default((nb_root.headers | default({}))['api-version'] | default((nb_root.headers | default({}))['API-version'] | default(''))) }}"
+        nb_api_version_raw: "{{ (nb_root.headers | default({}))['API-Version'] | default((nb_root.headers | default({}))['api-version'] | default('')) }}"
 
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
@@ -235,7 +235,7 @@
 
     - name: Merge per-network VLAN IDs into ib_net_vlan_map
       ansible.builtin.set_fact:
-        ib_net_vlan_map: "{{ ib_net_vlan_map combine({ item.item.network: (item.vids_for_net | default([])) }) }}"
+        ib_net_vlan_map: "{{ ib_net_vlan_map | combine({ item.item.network: (item.vids_for_net | default([])) }) }}"
       loop: "{{ ib_net_vlan_vids.results | default([]) }}"
       when: item.item.network is defined
 
@@ -532,7 +532,7 @@
 
     - name: Patch description on prefixes missing description (optional)
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/prefixes/{{ item.id }}/"
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ item.id }}"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: PATCH
