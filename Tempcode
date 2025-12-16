@@ -168,90 +168,63 @@
         ib_network_list: "{{ ib_networks.json | map(attribute='network') | list | default([]) }}"
         ib_ip_list: "{{ ib_fixed.json | map(attribute='ipv4addr') | list | default([]) }}"
 
-    - name: Build Infoblox VLAN list (basic)
+    - name: Build Infoblox VLAN vid list (from id)
       ansible.builtin.set_fact:
-        ib_vlan_list: "{{ ib_vlans.json | map('combine', {'vid': 0}) | list | default([]) }}"
-      # We'll calculate vid below from id
+        ib_vlan_vid_list: "{{ ib_vlans.json | map(attribute='id') | list | default([]) }}"
 
-    - name: Normalize VLAN vid field from 'id'
+    # ----------------- Build network→vlan pairs using VLAN.assigned_to (no block+loop) -----------------
+    - name: Initialize flat list of assigned refs
       ansible.builtin.set_fact:
-        ib_vlan_list: >-
-          {{ (ib_vlans.json | default([])) | map('extract', {'id': 'id', 'name': 'name', 'parent': 'parent', 'description': 'description', 'assigned_to': 'assigned_to'}) | list | map('combine', {'vid': 0}) | list }}
+        ib_vlan_net_refs: []
 
-    # ----------------- Build network→vlan map using VLAN.assigned_to -----------------
-    - name: Initialize Infoblox network→VLAN map (from VLAN.assigned_to)
+    - name: Collect {ref, vid} from VLAN.assigned_to (subelements)
       ansible.builtin.set_fact:
-        ib_net_vlan_map: {}
-
-    - name: Build pairs from VLAN.assigned_to (CIDR ← VLAN id)
+        ib_vlan_net_refs: "{{ (ib_vlan_net_refs | default([])) + [ {'ref': ref_to_use, 'vid': (item.0.id | int)} ] }}"
       vars:
-        vlan_obj: "{{ item }}"
-      loop: "{{ ib_vlans.json | default([]) }}"
-      loop_control:
-        label: "vid={{ item.id }} name={{ item.name | default('') }}"
-      block:
-        - name: When VLAN has assigned networks, fetch each network's CIDR
-          ansible.builtin.uri:
-            url: "{{ ib_base }}/{{ net_ref }}?_return_fields=network"
-            headers: { Accept: "application/json" }
-            url_username: "{{ infoblox_username }}"
-            url_password: "{{ infoblox_password }}"
-            force_basic_auth: true
-            validate_certs: "{{ infoblox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 30
-            follow_redirects: none
-            use_proxy: no
-          register: vlan_assigned_network_fetch
-          loop: >-
-            {{
-              (item.assigned_to | default([]))
-              | map('extract', {'network': 'network', 'ipv6network': 'ipv6network'})
-              | map('first')
-              | select('string')
-              | list
-            }}
-          loop_control:
-            loop_var: net_ref
-            label: "{{ net_ref }}"
-          when: (item.assigned_to | default([])) | length > 0
+        ref_to_use: "{{ item.1.network | default(item.1.ipv6network | default('')) }}"
+      loop: "{{ ib_vlans.json | default([]) | subelements('assigned_to', skip_missing=True) }}"
+      when: ref_to_use | length > 0
 
-        - name: Merge assigned networks into ib_net_vlan_map
-          ansible.builtin.set_fact:
-            ib_net_vlan_map: >-
-              {{ ib_net_vlan_map | combine(
-                   dict(
-                     (vlan_assigned_network_fetch.results | default([]))
-                     | map(attribute='json')
-                     | map(attribute='network')
-                     | list
-                     | select('string')
-                     | list
-                     | zip(
-                         repeat(item.id | int, ((vlan_assigned_network_fetch.results | default([])) | length))
-                       )
-                     | list
-                   )
-                 )
-              }}
-          when: vlan_assigned_network_fetch is defined
+    - name: Debug assigned refs
+      ansible.builtin.debug:
+        var: ib_vlan_net_refs
+
+    - name: Fetch CIDR for each assigned ref
+      ansible.builtin.uri:
+        url: "{{ ib_base }}/{{ item.ref }}?_return_fields=network"
+        headers: { Accept: "application/json" }
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ infoblox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+        follow_redirects: none
+        use_proxy: no
+      loop: "{{ ib_vlan_net_refs }}"
+      loop_control:
+        label: "{{ item.ref }}"
+      register: ib_vlan_assigned_cidrs
+
+    - name: Build network→vid map from fetched CIDRs
+      ansible.builtin.set_fact:
+        ib_net_vlan_map: "{{ ib_net_vlan_map | default({}) | combine( { (item.json.network): ( ib_vlan_net_refs[ (loop.index0) ].vid ) } ) }}"
+      loop: "{{ ib_vlan_assigned_cidrs.results | default([]) }}"
 
     - name: Debug network→vlan map (from assigned_to)
       ansible.builtin.debug:
         var: ib_net_vlan_map
 
-    # Build (network, first_vlan_vid) pairs (from map)
     - name: Initialize pairs list for prefix→vlan patch
       ansible.builtin.set_fact:
         ib_net_vlan_pairs: []
 
-    - name: Collect (network, first_vlan_vid) pairs
+    - name: Collect (network, vlan_vid) pairs
       ansible.builtin.set_fact:
-        ib_net_vlan_pairs: "{{ ib_net_vlan_pairs + [ {'network': item[0], 'vid': item[1]} ] }}"
-      loop: "{{ ib_net_vlan_map | dict2items | map(attribute='key') | zip(ib_net_vlan_map | dict2items | map(attribute='value')) | list }}"
-      when: (item[1] | string) | length > 0
+        ib_net_vlan_pairs: "{{ ib_net_vlan_pairs + [ {'network': item.key, 'vid': item.value} ] }}"
+      loop: "{{ ib_net_vlan_map | dict2items }}"
 
     - name: Debug pairs to patch
       ansible.builtin.debug:
@@ -263,7 +236,6 @@
         nb_prefix_list: "{{ (nb_prefixes.json.results | map(attribute='prefix') | list) | default([]) }}"
         nb_ip_list: "{{ (nb_ips.json.results | map(attribute='address') | map('regex_replace','/\\d+$','') | list) | default([]) }}"
         nb_vlan_vid_list: "{{ nb_vlans.json.results | map(attribute='vid') | list | default([]) }}"
-        ib_vlan_vid_list: "{{ ib_vlans.json | map(attribute='id') | list | default([]) }}"
 
     - name: Compute drift (prefixes, IPs, VLANs)
       ansible.builtin.set_fact:
@@ -359,53 +331,7 @@
         method: GET
         return_content: true
         status_code: [200]
-      loop: "{{ ib_vlan_list }}"
-      register: nb_vlan_checks
-
-    - name: Create missing VLANs (with description)
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/vlans/"
-        headers: "{{ nb_headers }}"
-        validate_certs: "{{ netbox_verify_ssl }}"
-        method: POST
-        body_format: json
-        body:
-          vid: "{{ item.id | int }}"
-          name: "{{ item.name | default('VLAN' ~ item.id) }}"
-          status: "active"
-          description: "Imported from Infoblox"
-        status_code: [201]
-        return_content: true
-      loop: "{{ ib_vlans.json | default([]) }}"
-      when: >
-        (remediate_vlans | default(true)) and
-        ((nb_vlan_checks.results
-          | selectattr('item.vid','equalto', item.id)
-          | map(attribute='json')
-          | map(attribute='count')
-          | list
-          | first
-          | int) == 0)
-      register: nb_vlan_creates
-
-    # ----------------- PATCH prefix.vlan -----------------
-    - name: Lookup NetBox VLAN by vid (for prefix patch; optional site)
-      ansible.builtin.uri:
-        url: >-
-          {{ netbox_url }}/api/ipam/vlans/?vid={{ item.vid }}
-          {% if netbox_vlan_site is defined and netbox_vlan_site|length > 0 %}
-          &site={{ netbox_vlan_site | urlencode }}
-          {% endif %}
-        headers: "{{ nb_headers }}"
-        validate_certs: "{{ netbox_verify_ssl }}"
-        method: GET
-        return_content: true
-        status_code: [200]
-        timeout: 30
       loop: "{{ ib_net_vlan_pairs }}"
-      loop_control:
-        label: "VID={{ item.vid }} → network={{ item.network }}"
-      when: patch_prefix_vlan | default(true)
       register: nb_vlan_lookup_pairs
 
     - name: Lookup NetBox Prefix by network (for vlan patch)
@@ -416,11 +342,7 @@
         method: GET
         return_content: true
         status_code: [200]
-        timeout: 30
       loop: "{{ ib_net_vlan_pairs }}"
-      loop_control:
-        label: "prefix={{ item.network }}"
-      when: patch_prefix_vlan | default(true)
       register: nb_prefix_lookup_pairs
 
     - name: Assert VLAN lookup is unique per item
@@ -435,7 +357,6 @@
           No VLAN found; create it first or verify vid mapping from Infoblox.
           {% endif %}
       loop: "{{ nb_vlan_lookup_pairs.results | default([]) }}"
-      when: patch_prefix_vlan | default(true)
 
     - name: Assert Prefix lookup is unique per item
       ansible.builtin.assert:
@@ -445,7 +366,6 @@
           Prefix lookup for {{ item.item.network }} returned {{ item.json.count | int }} result(s).
           Ensure the prefix exists and is unique.
       loop: "{{ nb_prefix_lookup_pairs.results | default([]) }}"
-      when: patch_prefix_vlan | default(true)
 
     - name: PATCH prefix → set VLAN (use VLAN primary key id) and description
       ansible.builtin.uri:
@@ -459,7 +379,6 @@
           description: "Imported from Infoblox"
         status_code: [200]
         return_content: true
-        timeout: 30
       vars:
         nb_vlan_pk: >-
           {{
@@ -496,7 +415,6 @@
       loop_control:
         label: "prefix={{ item.network }} → vid={{ item.vid }}"
       when:
-        - patch_prefix_vlan | default(true)
         - nb_vlan_pk | int > 0
         - nb_prefix_id | length > 0
       register: nb_prefix_vlan_patches
@@ -511,7 +429,7 @@
     # ----------------- OPTIONAL description patches -----------------
     - name: Patch description on VLANs missing description (optional)
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/vlans/{{ item.id }}/"
+        url: "{{ netbox_url }}/api/ipam/vlans/{{ item.id }}"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: PATCH
@@ -550,7 +468,7 @@
 
     - name: Delete extra prefixes (require 204)
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/prefixes/{{ prefix_id }}/"
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ prefix_id }}"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: DELETE
@@ -577,7 +495,7 @@
 
     - name: Delete extra VLANs (require 204)
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/vlans/{{ vlan_id }}/"
+        url: "{{ netbox_url }}/api/ipam/vlans/{{ vlan_id }}"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: DELETE
