@@ -1,3 +1,4 @@
+
 ---
 - name: Sync Infoblox → NetBox (create, delete, and map Prefix ↔ VLAN) + diagnostics
   hosts: localhost
@@ -147,6 +148,9 @@
         method: GET
         return_content: true
         status_code: [200]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: nb_prefixes
 
     - name: Get NetBox IP addresses (all)
@@ -157,6 +161,9 @@
         method: GET
         return_content: true
         status_code: [200]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: nb_ips
 
     - name: Get NetBox VLANs (all)
@@ -167,6 +174,9 @@
         method: GET
         return_content: true
         status_code: [200]
+        timeout: 60
+        follow_redirects: all
+        use_proxy: no
       register: nb_vlans
 
     - name: Build NetBox lists (values)
@@ -281,6 +291,8 @@
           'vlan_name': (item.0.name | default(''))
         } ] }}"
       vars:
+        # assigned_to items may be plain strings like "network/.../CIDR/default"
+        # OR dicts with 'network'/'ipv6network'
         ref_to_use: >-
           {{ item.1 if (item.1 is string)
              else (item.1.network | default(item.1.ipv6network | default(''))) }}
@@ -314,7 +326,8 @@
         msg: "{{ ib_vlan_assigned_cidrs.results | default([]) | list | json_query('[0:5]') }}"
       when: run_debug | default(true)
 
-    - name: Merge CIDRs into ib_net_vlan_map (CIDR → vid)  # uses item.item.vid, not loop.index0
+    # ---- Merge using item.item.vid (no loop.index0) ----
+    - name: Merge CIDRs into ib_net_vlan_map (CIDR → vid)
       ansible.builtin.set_fact:
         ib_net_vlan_map: "{{ (ib_net_vlan_map | default({})) | combine({ (item.json.network): (item.item.vid) }) }}"
       loop: "{{ ib_vlan_assigned_cidrs.results | default([]) }}"
@@ -358,6 +371,7 @@
         return_content: true
         status_code: [200]
         timeout: 30
+        follow_redirects: all
       loop: "{{ ib_net_vlan_pairs | default([]) }}"
       register: nb_vlan_lookup_pairs
 
@@ -374,24 +388,9 @@
         return_content: true
         status_code: [200]
         timeout: 30
+        follow_redirects: all
       loop: "{{ ib_net_vlan_pairs | default([]) }}"
       register: nb_prefix_lookup_pairs
-
-    - name: DEBUG | VLAN lookups with count != 1
-      ansible.builtin.debug:
-        msg:
-          - "pair={{ item.item }} count={{ item.json.count | default('') }}"
-          - "results={{ item.json.results | default([]) }}"
-      loop: "{{ nb_vlan_lookup_pairs.results | default([]) }}"
-      when: (item.json.count | default(0) | int) != 1 and (run_debug | default(true))
-
-    - name: DEBUG | Prefix lookups with count != 1
-      ansible.builtin.debug:
-        msg:
-          - "pair={{ item.item }} count={{ item.json.count | default('') }}"
-          - "results={{ item.json.results | default([]) }}"
-      loop: "{{ nb_prefix_lookup_pairs.results | default([]) }}"
-      when: (item.json.count | default(0) | int) != 1 and (run_debug | default(true))
 
     - name: Assert VLAN lookup unique
       ansible.builtin.assert:
@@ -413,7 +412,8 @@
 
     - name: PATCH prefix → set VLAN (use VLAN PK id) and description
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix_id }}"
+        # Trailing slash is IMPORTANT to avoid 301 on PATCH
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix_id }}/"
         headers: "{{ nb_headers }}"
         validate_certs: "{{ netbox_verify_ssl }}"
         method: PATCH
@@ -424,9 +424,11 @@
         status_code: [200]
         return_content: true
         timeout: 30
+        follow_redirects: all
       vars:
         nb_vlan_pk: >-
-          {{ (
+          {{
+            (
               nb_vlan_lookup_pairs.results
               | selectattr('item.vid','equalto', item.vid)
               | map(attribute='json')
@@ -440,7 +442,8 @@
             | default(0)
           }}
         nb_prefix_id: >-
-          {{ (
+          {{
+            (
               nb_prefix_lookup_pairs.results
               | selectattr('item.network','equalto', item.network)
               | map(attribute='json')
@@ -465,3 +468,61 @@
           - "Pairs considered: {{ ib_net_vlan_pairs | length }}"
           - "Patched: {{ (nb_prefix_vlan_patches.results | selectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
           - "Failures: {{ (nb_prefix_vlan_patches.results | rejectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
+
+    ###########################################################################
+    # OPTIONAL: delete extras (with trailing slash)
+    ###########################################################################
+    - name: Resolve NetBox prefix IDs for deletion
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+      loop: "{{ drift_networks_extra_in_nb }}"
+      when: delete_prefixes_missing_in_infoblox | default(false)
+      register: nb_prefix_delete_lookup
+
+    - name: Delete extra prefixes (require 204)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ prefix_id }}/"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: DELETE
+        status_code: [204]
+        follow_redirects: all
+      vars:
+        prefix_id: "{{ (item.json.results | map(attribute='id') | list | first) | default('') }}"
+      loop: "{{ nb_prefix_delete_lookup.results | default([]) }}"
+      when:
+        - delete_prefixes_missing_in_infoblox | default(false)
+        - prefix_id | length > 0
+      register: nb_prefix_deletes
+
+    - name: Resolve NetBox VLAN IDs for deletion (by vid)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ item }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+      loop: "{{ drift_vlans_extra_in_nb }}"
+      when: delete_vlans_missing_in_infoblox | default(false)
+      register: nb_vlan_delete_lookup
+
+    - name: Delete extra VLANs (require 204)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/{{ vlan_id }}/"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: DELETE
+        status_code: [204]
+        follow_redirects: all
+      vars:
+        vlan_id: "{{ (item.json.results | map(attribute='id') | list | first) | default('') }}"
+      loop: "{{ nb_vlan_delete_lookup.results | default([]) }}"
+      when:
+        - delete_vlans_missing_in_infoblox | default(false)
+        - vlan_id | length > 0
