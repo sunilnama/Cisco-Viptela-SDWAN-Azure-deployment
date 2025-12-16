@@ -5,38 +5,28 @@
   connection: local
 
   vars:
-    # ---------- Infoblox host/version normalization ----------
     ib_host: "{{ infoblox_host | regex_replace('/+$', '') }}"
     ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v', '') }}"
     ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
 
-    # ---------- NetBox REST headers ----------
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
-    # ---------- Tunables & toggles ----------
     ib_safe_max_results: 500
 
-    remediate_prefixes: true    # create missing prefixes
-    remediate_ips: true         # create missing IPs
-    remediate_vlans: true       # create missing VLANs
-    patch_prefix_vlan: true     # link prefixes to VLANs (PATCH)
+    remediate_prefixes: true
+    remediate_ips: true
+    remediate_vlans: true
+    patch_prefix_vlan: true
 
-    delete_prefixes_missing_in_infoblox: true   # delete prefixes present in NetBox but not in Infoblox
-    delete_vlans_missing_in_infoblox: false     # delete VLANs present in NetBox but not in Infoblox
+    delete_prefixes_missing_in_infoblox: true
+    delete_vlans_missing_in_infoblox: false
 
-    # Optional: Constrain VLAN lookup by site (name or slug) if duplicate vids exist across sites.
-    # Leave empty or unset if not needed.
     netbox_vlan_site: ""
-
-    # Minimum NetBox version check (optional safeguard)
     min_netbox_version: "3.5"
 
   tasks:
-    ###########################################################################
-    # NetBox readiness + version check via API-Version header (normalized)
-    ###########################################################################
     - name: Probe NetBox API root (readiness + version header)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/"
@@ -83,27 +73,10 @@
           - "ib_wapi_ver={{ ib_wapi_ver }}"
           - "ib_base={{ ib_base }}"
 
-    ###########################################################################
-    # Infoblox WAPI fetch (NIOS 8.5.x ⇒ v2.11; no redirects)
-    ###########################################################################
-    - name: Probe WAPI network schema (no redirects)
+    # ----------------- Infoblox fetch -----------------
+    - name: Get Infoblox networks (CIDRs only)
       ansible.builtin.uri:
-        url: "{{ ib_base }}/network?_schema"
-        url_username: "{{ infoblox_username }}"
-        url_password: "{{ infoblox_password }}"
-        force_basic_auth: true
-        validate_certs: "{{ infoblox_verify_ssl }}"
-        method: GET
-        return_content: true
-        status_code: [200, 401]
-        timeout: 30
-        follow_redirects: none
-        use_proxy: no
-      register: ib_net_schema
-
-    - name: Get Infoblox networks (CIDRs + VLAN refs) (no redirects)
-      ansible.builtin.uri:
-        url: "{{ ib_base }}/network?_return_fields=network,vlans&_max_results={{ ib_safe_max_results }}"
+        url: "{{ ib_base }}/network?_return_fields=network&_max_results={{ ib_safe_max_results }}"
         headers: { Accept: "application/json" }
         url_username: "{{ infoblox_username }}"
         url_password: "{{ infoblox_password }}"
@@ -117,7 +90,7 @@
         use_proxy: no
       register: ib_networks
 
-    - name: Get Infoblox fixed addresses (ipv4addr,name) (no redirects)
+    - name: Get Infoblox fixed addresses (ipv4addr,name)
       ansible.builtin.uri:
         url: "{{ ib_base }}/fixedaddress?_return_fields=ipv4addr,name&_max_results={{ ib_safe_max_results }}"
         headers: { Accept: "application/json" }
@@ -133,9 +106,9 @@
         use_proxy: no
       register: ib_fixed
 
-    - name: Get Infoblox VLANs (id,name,parent,description) (no redirects)
+    - name: Get Infoblox VLANs (include assigned_to refs)
       ansible.builtin.uri:
-        url: "{{ ib_base }}/vlan?_return_fields=id,name,parent,description&_max_results={{ ib_safe_max_results }}"
+        url: "{{ ib_base }}/vlan?_return_fields=id,name,parent,description,assigned_to&_max_results={{ ib_safe_max_results }}"
         headers: { Accept: "application/json" }
         url_username: "{{ infoblox_username }}"
         url_password: "{{ infoblox_password }}"
@@ -149,9 +122,7 @@
         use_proxy: no
       register: ib_vlans
 
-    ###########################################################################
-    # NetBox reads
-    ###########################################################################
+    # ----------------- NetBox reads -----------------
     - name: Get NetBox prefixes (all)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/?limit=0"
@@ -191,74 +162,102 @@
         use_proxy: no
       register: nb_vlans
 
-    ###########################################################################
-    # Build Infoblox lists & maps
-    ###########################################################################
+    # ----------------- Build lists -----------------
     - name: Build Infoblox network & IP lists
       ansible.builtin.set_fact:
         ib_network_list: "{{ ib_networks.json | map(attribute='network') | list | default([]) }}"
         ib_ip_list: "{{ ib_fixed.json | map(attribute='ipv4addr') | list | default([]) }}"
 
-    - name: Initialize VLAN list
+    - name: Build Infoblox VLAN list (basic)
       ansible.builtin.set_fact:
-        ib_vlan_list: []
+        ib_vlan_list: "{{ ib_vlans.json | map('combine', {'vid': 0}) | list | default([]) }}"
+      # We'll calculate vid below from id
 
-    - name: Append VLAN items (vid/name/parent/description)
+    - name: Normalize VLAN vid field from 'id'
       ansible.builtin.set_fact:
         ib_vlan_list: >-
-          {{ ib_vlan_list + [ {
-              'vid': item.id | int,
-              'name': item.name | default(''),
-              'parent': item.parent | default(''),
-              'description': item.description | default('')
-            } ] }}
-      loop: "{{ ib_vlans.json | default([]) }}"
+          {{ (ib_vlans.json | default([])) | map('extract', {'id': 'id', 'name': 'name', 'parent': 'parent', 'description': 'description', 'assigned_to': 'assigned_to'}) | list | map('combine', {'vid': 0}) | list }}
 
-    # Build network → VLAN-IDs map (extract VLAN vid from Infoblox refs)
-    - name: Initialize Infoblox network→VLAN map
+    # ----------------- Build network→vlan map using VLAN.assigned_to -----------------
+    - name: Initialize Infoblox network→VLAN map (from VLAN.assigned_to)
       ansible.builtin.set_fact:
         ib_net_vlan_map: {}
 
-    - name: Collect VLAN IDs for each Infoblox network
-      ansible.builtin.set_fact:
-        vids_for_net: >-
-          {{
-            item.vlans | default([]) |
-            map(attribute='vlan') |
-            map('regex_replace', '^.*/', '') |
-            map('int') | list
-          }}
-      loop: "{{ ib_networks.json | default([]) }}"
+    - name: Build pairs from VLAN.assigned_to (CIDR ← VLAN id)
+      vars:
+        vlan_obj: "{{ item }}"
+      loop: "{{ ib_vlans.json | default([]) }}"
       loop_control:
-        label: "{{ item.network }}"
-      register: ib_net_vlan_vids
+        label: "vid={{ item.id }} name={{ item.name | default('') }}"
+      block:
+        - name: When VLAN has assigned networks, fetch each network's CIDR
+          ansible.builtin.uri:
+            url: "{{ ib_base }}/{{ net_ref }}?_return_fields=network"
+            headers: { Accept: "application/json" }
+            url_username: "{{ infoblox_username }}"
+            url_password: "{{ infoblox_password }}"
+            force_basic_auth: true
+            validate_certs: "{{ infoblox_verify_ssl }}"
+            method: GET
+            return_content: true
+            status_code: [200]
+            timeout: 30
+            follow_redirects: none
+            use_proxy: no
+          register: vlan_assigned_network_fetch
+          loop: >-
+            {{
+              (item.assigned_to | default([]))
+              | map('extract', {'network': 'network', 'ipv6network': 'ipv6network'})
+              | map('first')
+              | select('string')
+              | list
+            }}
+          loop_control:
+            loop_var: net_ref
+            label: "{{ net_ref }}"
+          when: (item.assigned_to | default([])) | length > 0
 
-    - name: Merge per-network VLAN IDs into ib_net_vlan_map
-      ansible.builtin.set_fact:
-        ib_net_vlan_map: "{{ ib_net_vlan_map | combine({ item.item.network: (item.vids_for_net | default([])) }) }}"
-      loop: "{{ ib_net_vlan_vids.results | default([]) }}"
-      when: item.item.network is defined
+        - name: Merge assigned networks into ib_net_vlan_map
+          ansible.builtin.set_fact:
+            ib_net_vlan_map: >-
+              {{ ib_net_vlan_map | combine(
+                   dict(
+                     (vlan_assigned_network_fetch.results | default([]))
+                     | map(attribute='json')
+                     | map(attribute='network')
+                     | list
+                     | select('string')
+                     | list
+                     | zip(
+                         repeat(item.id | int, ((vlan_assigned_network_fetch.results | default([])) | length))
+                       )
+                     | list
+                   )
+                 )
+              }}
+          when: vlan_assigned_network_fetch is defined
 
-    # Build list of (network, first_vlan_vid) pairs for patching
+    - name: Debug network→vlan map (from assigned_to)
+      ansible.builtin.debug:
+        var: ib_net_vlan_map
+
+    # Build (network, first_vlan_vid) pairs (from map)
     - name: Initialize pairs list for prefix→vlan patch
       ansible.builtin.set_fact:
         ib_net_vlan_pairs: []
 
     - name: Collect (network, first_vlan_vid) pairs
       ansible.builtin.set_fact:
-        ib_net_vlan_pairs: "{{ ib_net_vlan_pairs + [ {'network': item.key, 'vid': (item.value | first)} ] }}"
-      loop: "{{ ib_net_vlan_map | dict2items }}"
-      when: (item.value | length) > 0
+        ib_net_vlan_pairs: "{{ ib_net_vlan_pairs + [ {'network': item[0], 'vid': item[1]} ] }}"
+      loop: "{{ ib_net_vlan_map | dict2items | map(attribute='key') | zip(ib_net_vlan_map | dict2items | map(attribute='value')) | list }}"
+      when: (item[1] | string) | length > 0
 
-    - name: Warn when multiple VLANs are assigned to a single network
+    - name: Debug pairs to patch
       ansible.builtin.debug:
-        msg: "Network {{ item.key }} has multiple VLANs assigned in Infoblox: {{ item.value }}"
-      loop: "{{ ib_net_vlan_map | dict2items }}"
-      when: (item.value | length) > 1
+        var: ib_net_vlan_pairs
 
-    ###########################################################################
-    # Build NetBox lists + drift (prefixes, IPs, VLANs)
-    ###########################################################################
+    # ----------------- NetBox drift lists -----------------
     - name: Build NetBox lists
       ansible.builtin.set_fact:
         nb_prefix_list: "{{ (nb_prefixes.json.results | map(attribute='prefix') | list) | default([]) }}"
@@ -275,9 +274,7 @@
         drift_vlans_missing_in_nb:    "{{ ib_vlan_vid_list | difference(nb_vlan_vid_list) }}"
         drift_vlans_extra_in_nb:      "{{ nb_vlan_vid_list | difference(ib_vlan_vid_list) }}"
 
-    ###########################################################################
-    # CREATE: prefixes, IPs, VLANs (check-then-create; add description; require 201)
-    ###########################################################################
+    # ----------------- CREATE -----------------
     - name: Check if prefix exists (NetBox)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item }}"
@@ -373,17 +370,17 @@
         method: POST
         body_format: json
         body:
-          vid: "{{ item.vid | int }}"
-          name: "{{ item.name | default('VLAN' ~ item.vid) }}"
+          vid: "{{ item.id | int }}"
+          name: "{{ item.name | default('VLAN' ~ item.id) }}"
           status: "active"
           description: "Imported from Infoblox"
         status_code: [201]
         return_content: true
-      loop: "{{ ib_vlan_list }}"
+      loop: "{{ ib_vlans.json | default([]) }}"
       when: >
         (remediate_vlans | default(true)) and
         ((nb_vlan_checks.results
-          | selectattr('item.vid','equalto', item.vid)
+          | selectattr('item.vid','equalto', item.id)
           | map(attribute='json')
           | map(attribute='count')
           | list
@@ -391,9 +388,7 @@
           | int) == 0)
       register: nb_vlan_creates
 
-    ###########################################################################
-    # PATCH: link NetBox prefix.vlan using Infoblox map (strict; no block+loop)
-    ###########################################################################
+    # ----------------- PATCH prefix.vlan -----------------
     - name: Lookup NetBox VLAN by vid (for prefix patch; optional site)
       ansible.builtin.uri:
         url: >-
@@ -428,7 +423,6 @@
       when: patch_prefix_vlan | default(true)
       register: nb_prefix_lookup_pairs
 
-    # Strict assertions (each must return exactly one result)
     - name: Assert VLAN lookup is unique per item
       ansible.builtin.assert:
         that:
@@ -453,7 +447,7 @@
       loop: "{{ nb_prefix_lookup_pairs.results | default([]) }}"
       when: patch_prefix_vlan | default(true)
 
-    - name: Patch NetBox prefix → set VLAN (use VLAN primary key id) and description
+    - name: PATCH prefix → set VLAN (use VLAN primary key id) and description
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix_id }}/"
         headers: "{{ nb_headers }}"
@@ -461,7 +455,7 @@
         method: PATCH
         body_format: json
         body:
-          vlan: "{{ nb_vlan_pk | int }}"   # NetBox expects VLAN PK, not vid
+          vlan: "{{ nb_vlan_pk | int }}"
           description: "Imported from Infoblox"
         status_code: [200]
         return_content: true
@@ -514,9 +508,7 @@
           - "Patched count: {{ (nb_prefix_vlan_patches.results | selectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
           - "Failures: {{ (nb_prefix_vlan_patches.results | rejectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
 
-    ###########################################################################
-    # OPTIONAL: Patch description on existing VLANs/prefixes (if empty)
-    ###########################################################################
+    # ----------------- OPTIONAL description patches -----------------
     - name: Patch description on VLANs missing description (optional)
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/vlans/{{ item.id }}/"
@@ -543,9 +535,7 @@
       loop: "{{ nb_prefixes.json.results | default([]) }}"
       when: (item.description | default('')) | length == 0
 
-    ###########################################################################
-    # DELETE: prefixes, VLANs (toggleable; require 204)
-    ###########################################################################
+    # ----------------- DELETE (optional) -----------------
     - name: Resolve NetBox prefix IDs for deletion
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item }}"
