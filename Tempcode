@@ -1,41 +1,155 @@
-
 ---
-- name: Quick debug of mapping vars (no changes)
+- name: Diagnostics — collect mapping and show why prefixes remain unmapped
   hosts: localhost
   gather_facts: false
   connection: local
 
-  vars_files:
-    # If you keep common variables in a vars file, include it here:
-    # - vars/common.yml
-
   vars:
-    # Import the same variables you used for the main play
-    netbox_url: "https://<NETBOX>"
-    netbox_token: "<TOKEN>"
-    netbox_verify_ssl: false
-    infoblox_host: "https://<INFOBLOX>"
-    infoblox_username: "<USER>"
-    infoblox_password: "<PASS>"
-    infoblox_wapi_version: "2.11"
+    # Pass these via -e on the CLI
+    netbox_url: "{{ netbox_url | default('https://<NETBOX>') }}"
+    netbox_token: "{{ netbox_token | default('TOKEN') }}"
+    netbox_verify_ssl: "{{ netbox_verify_ssl | default(false) }}"
 
-    # If these were previously set in the play, set them here too
-    ib_vlan_net_refs: "{{ hostvars['localhost']['ib_vlan_net_refs'] | default([]) }}"
-    ib_net_vlan_map:  "{{ hostvars['localhost']['ib_net_vlan_map']  | default({}) }}"
-    ib_net_vlan_pairs: "{{ hostvars['localhost']['ib_net_vlan_pairs'] | default([]) }}"
+    infoblox_host: "{{ infoblox_host | default('https://<INFOBLOX>') }}"
+    infoblox_username: "{{ infoblox_username | default('admin') }}"
+    infoblox_password: "{{ infoblox_password | default('infoblox') }}"
+    infoblox_wapi_version: "{{ infoblox_wapi_version | default('2.11') }}"
+
     nb_headers:
       Authorization: "Token {{ netbox_token }}"
       Content-Type: "application/json"
 
+    ib_host: "{{ infoblox_host | regex_replace('/+$', '') }}"
+    ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v', '') }}"
+    ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
+
+    ib_safe_max_results: 500
+    netbox_vlan_site: "{{ netbox_vlan_site | default('') }}"
+
   tasks:
+    - name: INFO | Show endpoints used
+      debug:
+        msg:
+          - "NetBox: {{ netbox_url }}"
+          - "Infoblox: {{ ib_base }}"
+
+    # --- INFOblox: Get VLANs (with assigned_to) and build refs ---
+    - name: Get Infoblox VLANs (include assigned_to)
+      uri:
+        url: "{{ ib_base }}/vlan?_return_fields=id,name,parent,description,assigned_to&_max_results={{ ib_safe_max_results }}"
+        headers: { Accept: "application/json" }
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ (infoblox_verify_ssl | default(false)) }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        follow_redirects: none
+      register: ib_vlans
+
+    - name: Build VLAN→network refs (flat)
+      set_fact:
+        ib_vlan_net_refs: []
+
+    - name: Collect {ref, vid} from VLAN.assigned_to
+      set_fact:
+        ib_vlan_net_refs: "{{ (ib_vlan_net_refs | default([])) + [ {'ref': ref_to_use, 'vid': (item.0.id | int), 'vlan_name': (item.0.name | default('')) } ] }}"
+      vars:
+        ref_to_use: "{{ item.1.network | default(item.1.ipv6network | default('')) }}"
+      loop: "{{ ib_vlans.json | default([]) | subelements('assigned_to', skip_missing=True) }}"
+      when: ref_to_use | length > 0
+
     - name: DEBUG | ib_vlan_net_refs (first few entries)
       debug:
         msg: "{{ ib_vlan_net_refs | slice(0,10) }}"
 
+    # --- Fetch each network's CIDR and build a map CIDR → vid ---
+    - name: Fetch CIDR for each assigned ref
+      uri:
+        url: "{{ ib_base }}/{{ item.ref }}?_return_fields=network"
+        headers: { Accept: "application/json" }
+        url_username: "{{ infoblox_username }}"
+        url_password: "{{ infoblox_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ (infoblox_verify_ssl | default(false)) }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        follow_redirects: none
+      loop: "{{ ib_vlan_net_refs | default([]) }}"
+      register: ib_vlan_assigned_cidrs
+
+    - name: Merge CIDRs into ib_net_vlan_map (CIDR → vid)
+      set_fact:
+        ib_net_vlan_map: "{{ (ib_net_vlan_map | default({})) | combine( { (item.json.network): ( ib_vlan_net_refs[(loop.index0)].vid ) } ) }}"
+      loop: "{{ ib_vlan_assigned_cidrs.results | default([]) }}"
+      when:
+        - item.json is defined
+        - item.json.network is defined
+
     - name: DEBUG | ib_net_vlan_map sample
       debug:
-        msg: "{{ ib_net_vlan_map | dict2items | slice(0,10) }}"
+        msg: "{{ (ib_net_vlan_map | default({})) | dict2items | slice(0,10) }}"
 
-    - name: DEBUG | first 10 pairs to patch
+    # --- Build pairs to test NetBox lookups (no patch) ---
+    - name: Build (network, vid) pairs
+      set_fact:
+        ib_net_vlan_pairs: []
+
+    - name: Collect pairs
+      set_fact:
+        ib_net_vlan_pairs: "{{ ib_net_vlan_pairs + [ {'network': item.key, 'vid': item.value} ] }}"
+      loop: "{{ (ib_net_vlan_map | default({})) | dict2items }}"
+
+    - name: DEBUG | first 10 pairs
       debug:
-        msg: "{{ ib_net_vlan_pairs | slice
+        msg: "{{ ib_net_vlan_pairs | slice(0,10) }}"
+
+    # --- NetBox lookups to detect why mapping fails ---
+    - name: NetBox | Lookup VLAN by vid (optional site)
+      uri:
+        url: >-
+          {{ netbox_url }}/api/ipam/vlans/?vid={{ item.vid }}
+          {% if netbox_vlan_site | length > 0 %}&site={{ netbox_vlan_site | urlencode }}{% endif %}
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+      loop: "{{ ib_net_vlan_pairs | default([]) }}"
+      register: nb_vlan_lookup_pairs
+
+    - name: NetBox | Lookup Prefix by CIDR (no VRF filter yet)
+      uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item.network }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+      loop: "{{ ib_net_vlan_pairs | default([]) }}"
+      register: nb_prefix_lookup_pairs
+
+    - name: DEBUG | Show ambiguous or missing VLAN lookups
+      debug:
+        msg: >-
+          {{
+            (nb_vlan_lookup_pairs.results | default([]))
+            | map('combine', {'vid': None})
+            | list
+            | map('combine', {'vid': attribute('item.vid')})
+            | selectattr('json.count', 'ne', 1)
+            | map(attribute='item')
+            | list
+          }}
+
+    - name: DEBUG | Show ambiguous or missing Prefix lookups
+      debug:
+        msg: >-
+          {{
+            (nb_prefix_lookup_pairs.results | default([]))
+            | selectattr('json.count', 'ne', 1)
+            | map(attribute='item')
+            | list
+          }}
