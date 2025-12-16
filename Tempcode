@@ -21,7 +21,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
 
 
-
 ---
 - name: Sync Infoblox IPAM data to NetBox (prefixes, IPs, VLANs) + drift create/patch/delete
   hosts: localhost
@@ -80,14 +79,13 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
-    # (Keep your existing version normalization logic intact as in your original file)
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
-        nb_api_version_semver: "{{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') length == 2) else '') }}"
+        nb_api_version_semver: "{{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}"
 
     - name: Normalize baseline (min_netbox_version) to semver (X.Y.Z)
       ansible.builtin.set_fact:
-        min_nb_semver: "{{ min_netbox_version ~ ('.0' if (min_netbox_version.split('.') length == 2) else '') }}"
+        min_nb_semver: "{{ min_netbox_version ~ ('.0' if (min_netbox_version.split('.') | length == 2) else '') }}"
 
     - name: Enforce minimum NetBox version (normalized semver)
       ansible.builtin.assert:
@@ -404,90 +402,127 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       register: nb_vlan_creates
 
     ###########################################################################
-    # PATCH: link NetBox prefix.vlan using Infoblox network→VLAN map (strict with VLAN id)
+    # PATCH: link NetBox prefix.vlan using Infoblox map (strict; no block+loop)
     ###########################################################################
-    - name: Associate NetBox prefixes to VLANs (strict per-item)
+    - name: Lookup NetBox VLAN by vid (for prefix patch; optional site)
+      ansible.builtin.uri:
+        url: >-
+          {{ netbox_url }}/api/ipam/vlans/?vid={{ item.vid }}
+          {% if netbox_vlan_site is defined and netbox_vlan_site|length > 0 %}
+          &site={{ netbox_vlan_site | urlencode }}
+          {% endif %}
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+      loop: "{{ ib_net_vlan_pairs }}"
+      loop_control:
+        label: "VID={{ item.vid }} → network={{ item.network }}"
+      when: patch_prefix_vlan | default(true)
+      register: nb_vlan_lookup_pairs
+
+    - name: Lookup NetBox Prefix by network (for vlan patch)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item.network }}"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: GET
+        return_content: true
+        status_code: [200]
+        timeout: 30
+      loop: "{{ ib_net_vlan_pairs }}"
+      loop_control:
+        label: "prefix={{ item.network }}"
+      when: patch_prefix_vlan | default(true)
+      register: nb_prefix_lookup_pairs
+
+    # Strict assertions (each must return exactly one result)
+    - name: Assert VLAN lookup is unique per item
+      ansible.builtin.assert:
+        that:
+          - item.json.count | int == 1
+        fail_msg: >-
+          VLAN lookup for {{ item.item.vid }} returned {{ item.json.count | int }} result(s).
+          {% if item.json.count | int > 1 %}
+          Multiple VLANs share the vid. Constrain by site using `netbox_vlan_site` or ensure unique vids.
+          {% else %}
+          No VLAN found; create it first or verify vid mapping from Infoblox.
+          {% endif %}
+      loop: "{{ nb_vlan_lookup_pairs.results | default([]) }}"
+      when: patch_prefix_vlan | default(true)
+
+    - name: Assert Prefix lookup is unique per item
+      ansible.builtin.assert:
+        that:
+          - item.json.count | int == 1
+        fail_msg: >-
+          Prefix lookup for {{ item.item.network }} returned {{ item.json.count | int }} result(s).
+          Ensure the prefix exists and is unique.
+      loop: "{{ nb_prefix_lookup_pairs.results | default([]) }}"
+      when: patch_prefix_vlan | default(true)
+
+    - name: Patch NetBox prefix → set VLAN (use VLAN primary key id) and description
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix_id }}/"
+        headers: "{{ nb_headers }}"
+        validate_certs: "{{ netbox_verify_ssl }}"
+        method: PATCH
+        body_format: json
+        body:
+          vlan: "{{ nb_vlan_pk | int }}"   # NetBox expects VLAN PK, not vid
+          description: "Imported from Infoblox"
+        status_code: [200]
+        return_content: true
+        timeout: 30
       vars:
-        infoblox_pairs: "{{ ib_net_vlan_pairs }}"
-      loop: "{{ infoblox_pairs }}"
+        nb_vlan_pk: >-
+          {{
+            (
+              nb_vlan_lookup_pairs.results
+              | selectattr('item.network','equalto', item.network)
+              | selectattr('item.vid','equalto', item.vid)
+              | map(attribute='json')
+              | map(attribute='results')
+              | list
+              | first
+              | default([])
+            )
+            | map(attribute='id')
+            | first
+            | default(0)
+          }}
+        nb_prefix_id: >-
+          {{
+            (
+              nb_prefix_lookup_pairs.results
+              | selectattr('item.network','equalto', item.network)
+              | map(attribute='json')
+              | map(attribute='results')
+              | list
+              | first
+              | default([])
+            )
+            | map(attribute='id')
+            | first
+            | default('')
+          }}
+      loop: "{{ ib_net_vlan_pairs }}"
       loop_control:
         label: "prefix={{ item.network }} → vid={{ item.vid }}"
-      when: patch_prefix_vlan | default(true)
-      block:
-
-        - name: Lookup NetBox VLAN by vid (optionally constrain by site)
-          ansible.builtin.uri:
-            url: >-
-              {{ netbox_url }}/api/ipam/vlans/?vid={{ item.vid }}
-              {% if netbox_vlan_site is defined and netbox_vlan_site|length > 0 %}
-              &site={{ netbox_vlan_site | urlencode }}
-              {% endif %}
-            headers: "{{ nb_headers }}"
-            validate_certs: "{{ netbox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 30
-          register: vlan_q
-
-        - name: Fail if VLAN lookup is ambiguous or missing
-          ansible.builtin.assert:
-            that:
-              - vlan_q.json.count | int == 1
-            fail_msg: >-
-              VLAN lookup for vid={{ item.vid }} returned {{ vlan_q.json.count | int }} result(s).
-              {% if vlan_q.json.count | int > 1 %}
-              Multiple VLANs share the same vid. Constrain by site using `netbox_vlan_site` or ensure unique vids.
-              {% else %}
-              No VLAN found; create it first or verify vid mapping from Infoblox.
-              {% endif %}
-
-        - name: Lookup NetBox Prefix by CIDR
-          ansible.builtin.uri:
-            url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ item.network }}"
-            headers: "{{ nb_headers }}"
-            validate_certs: "{{ netbox_verify_ssl }}"
-            method: GET
-            return_content: true
-            status_code: [200]
-            timeout: 30
-          register: prefix_q
-
-        - name: Fail if prefix lookup is ambiguous or missing
-          ansible.builtin.assert:
-            that:
-              - prefix_q.json.count | int == 1
-            fail_msg: >-
-              Prefix lookup for {{ item.network }} returned {{ prefix_q.json.count | int }} result(s).
-              Ensure the prefix exists and is unique.
-
-        - name: PATCH prefix → set VLAN (use VLAN primary key id) and description
-          ansible.builtin.uri:
-            url: "{{ netbox_url }}/api/ipam/prefixes/{{ prefix_q.json.results[0].id }}/"
-            headers: "{{ nb_headers }}"
-            validate_certs: "{{ netbox_verify_ssl }}"
-            method: PATCH
-            body_format: json
-            body:
-              vlan: "{{ vlan_q.json.results[0].id }}"  # NetBox expects VLAN PK, not vid
-              description: "Imported from Infoblox"
-            status_code: [200]
-            return_content: true
-            timeout: 30
-          register: patch_q
-
-        - name: Show per-item patch result
-          ansible.builtin.debug:
-            msg: >-
-              Patched prefix {{ item.network }} with VLAN id={{ vlan_q.json.results[0].id }} (vid={{ item.vid }}).
-              New description="{{ patch_q.json.description | default('') }}".
-              API status={{ patch_q.status }}.
+      when:
+        - patch_prefix_vlan | default(true)
+        - nb_vlan_pk | int > 0
+        - nb_prefix_id | length > 0
+      register: nb_prefix_vlan_patches
 
     - name: Show PREFIX→VLAN patch summary
       ansible.builtin.debug:
         msg:
           - "Pairs considered: {{ ib_net_vlan_pairs | length }}"
-          - "Hint: If any item failed earlier, check the assert error for the exact reason."
+          - "Patched count: {{ (nb_prefix_vlan_patches.results | selectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
+          - "Failures: {{ (nb_prefix_vlan_patches.results | rejectattr('status','equalto',200) | list | length) if nb_prefix_vlan_patches is defined else 0 }}"
 
     ###########################################################################
     # OPTIONAL: Patch description on existing VLANs/prefixes (if empty)
@@ -577,4 +612,3 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
       register: nb_vlan_deletes
       failed_when: nb_vlan_deletes.status != 204
 ``
-
