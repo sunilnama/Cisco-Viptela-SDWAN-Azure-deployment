@@ -1,26 +1,3 @@
-
-Netbox token for the sync -- 085ecfd33f9f497536d67570d09f22493ae585f0
-
-
-curl -I \
-  -H "Authorization: Token 085ecfd33f9f497536d67570d09f22493ae585f0" \
-  http://172.17.228.82:8000/api/
-
-
-
-# Try WAPI v2.11
-curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11/network?_schema"
-
-# If needed, try the minor v2.11.1
-curl -k -u admin:YourPassword "https://<infoblox-host>/wapi/v2.11.1/network?_schema"
-
-
-curl -k -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"     # expect 200/401
-curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # if it redirects, you'll see /wapi/ Unknown WAPI version
-
-
-
-
 ---
 - name: Sync Infoblox IPAM data to NetBox (prefixes, IPs, VLANs) + drift create/patch/delete
   hosts: localhost
@@ -29,8 +6,8 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
 
   vars:
     # ---------- Infoblox host/version normalization ----------
-    ib_host: "{{ infoblox_host regex_replace('/+$','') }}"
-    ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) regex_replace('^v','') }}"
+    ib_host: "{{ infoblox_host | regex_replace('/+$', '') }}"
+    ib_wapi_ver: "{{ (infoblox_wapi_version | default('2.11')) | regex_replace('^v', '') }}"
     ib_base: "{{ ib_host }}/wapi/v{{ ib_wapi_ver }}"
 
     # ---------- NetBox REST headers ----------
@@ -79,9 +56,14 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
           - nb_root.status == 200
         fail_msg: "NetBox API root not reachable at {{ netbox_url }}/api/"
 
+    - name: Extract NetBox API version from headers
+      ansible.builtin.set_fact:
+        nb_api_version_raw: "{{ (nb_root.headers | default({}))['API-Version'] | default((nb_root.headers | default({}))['api-version'] | default((nb_root.headers | default({}))['API-version'] | default(''))) }}"
+
     - name: Normalize NetBox API-Version header to semver (X.Y.Z)
       ansible.builtin.set_fact:
-        nb_api_version_semver: "{{ nb_root.api_version ~ ('.0' if (nb_root.api_version.split('.') | length == 2) else '') }}"
+        nb_api_version_semver: "{{ nb_api_version_raw ~ ('.0' if (nb_api_version_raw.split('.') | length == 2) else '') }}"
+      when: nb_api_version_raw | length > 0
 
     - name: Normalize baseline (min_netbox_version) to semver (X.Y.Z)
       ansible.builtin.set_fact:
@@ -92,6 +74,14 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         that:
           - nb_api_version_semver is version(min_nb_semver, '>=')
         fail_msg: "NetBox version too old: got {{ nb_api_version_semver }}, need >= {{ min_nb_semver }}."
+      when: nb_api_version_raw | length > 0
+
+    - name: Debug Infoblox base URL parts
+      ansible.builtin.debug:
+        msg:
+          - "ib_host={{ ib_host }}"
+          - "ib_wapi_ver={{ ib_wapi_ver }}"
+          - "ib_base={{ ib_base }}"
 
     ###########################################################################
     # Infoblox WAPI fetch (NIOS 8.5.x ⇒ v2.11; no redirects)
@@ -582,7 +572,6 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         - delete_prefixes_missing_in_infoblox | default(false)
         - prefix_id | length > 0
       register: nb_prefix_deletes
-      failed_when: nb_prefix_deletes.status != 204
 
     - name: Resolve NetBox VLAN IDs for deletion (by vid)
       ansible.builtin.uri:
@@ -610,5 +599,3 @@ curl -k -L -u admin:PASS "https://172.17.228.84/wapi/v2.11/network?_schema"  # i
         - delete_vlans_missing_in_infoblox | default(false)
         - vlan_id | length > 0
       register: nb_vlan_deletes
-      failed_when: nb_vlan_deletes.status != 204
-``
