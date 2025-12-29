@@ -1,2 +1,45 @@
 "id": "20ba9d93-cfde-4e55-b4a0-1991e79e7cf6"
 endPortName": "GigabitEthernet1/0/21",
+
+https://172.17.223.19/dna/intent/api/v1/interface/network-device/20ba9d93-cfde-4e55-b4a0-1991e79e7cf6/interface-name?name=GigabitEthernet1/0/21
+
+{
+    "response": {
+        "addresses": [],
+        "adminStatus": "UP",
+        "className": null,
+        "deviceId": "20ba9d93-cfde-4e55-b4a0-1991e79e7cf6",
+        "duplex": "FullDuplex",
+        "ifIndex": "29",
+        "interfaceType": "Physical",
+        "ipv4Address": null,
+        "ipv4Mask": null,
+        "isisSupport": "false",
+        "lastIncomingPacketTime": 1766995591000,
+        "lastOutgoingPacketTime": 1766995606000,
+        "lastUpdated": null,
+        "macAddress": "e8:eb:34:69:0f:15",
+        "mappedPhysicalInterfaceId": null,
+        "mappedPhysicalInterfaceName": null,
+        "mediaType": null,
+        "mtu": "1500",
+        "nativeVlanId": "222",
+        "ospfSupport": "false",
+        "pid": "C9300-48U",
+        "portMode": "trunk",
+        "portName": "GigabitEthernet1/0/21",
+        "portType": "Ethernet Port",
+        "serialNo": "FOC2450L8W5",
+        "series": "Cisco Catalyst 9300 Series Switches",
+        "speed": "1000000",
+        "status": "up",
+        "vlanId": "1",
+        "voiceVlan": "",
+        "description": "172.17.222.238_EWLC AP889C.AD4A.4DF8",
+        "name": null,
+        "instanceUuid": "e7d53712-b19e-4ec0-8591-f3af2052a074",
+        "instanceTenantId": "6565967250f6f26179a4de44",
+        "id": "e7d53712-b19e-4ec0-8591-f3af2052a074"
+    },
+    "version": "1.0"
+}
