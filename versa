@@ -1,0 +1,954 @@
+{
+-"snmp": {
+-"snmp": {
+-"tags": [
+"replace"
+]
+},
+-"agent": {
+"enabled": "false",
+"ip": "127.0.0.1",
+"udp-port": "161",
+-"extra-listen": [
+-{
+"ip": "::1",
+"udp-port": "161"
+}
+],
+-"version": {
+-"@@version": {
+-"tags": [
+"replace"
+]
+},
+-"v1": [
+null
+],
+-"v2c": [
+null
+]
+},
+"max-message-size": "50000"
+},
+-"system": {
+"name": "{$v_Alex_Site_Name__sitesSiteName}",
+"location": "{$v_location__IdLocation}"
+},
+-"notify": [
+-{
+"name": "std_v1_trap",
+"tag": "std_v1_trap",
+"type": "trap"
+},
+-{
+"name": "std_v2_inform",
+"tag": "std_v2_inform",
+"type": "inform"
+},
+-{
+"name": "std_v2_trap",
+"tag": "std_v2_trap",
+"type": "trap"
+},
+-{
+"name": "std_v3_inform",
+"tag": "std_v3_inform",
+"type": "inform"
+},
+-{
+"name": "std_v3_trap",
+"tag": "std_v3_trap",
+"type": "trap"
+}
+],
+-"vacm": {
+-"view": [
+-{
+"name": "internet",
+-"subtree": [
+-{
+"oids": "1.2",
+-"included": [
+null
+]
+},
+-{
+"oids": "1.3",
+-"included": [
+null
+]
+},
+-{
+"oids": "1.3.6.1",
+-"included": [
+null
+]
+}
+]
+}
+]
+}
+},
+-"interfaces": {
+-"interfaces": {
+-"tags": [
+"replace"
+]
+},
+-"vni": [
+-{
+"name": "vni-0/0",
+"enable": "true",
+-"unit": [
+-{
+"name": "0",
+"description": "WAN interface: Internet",
+"vlan-id": "0",
+"enable": "true",
+-"family": {
+-"inet": {
+-"address": [
+-{
+"addr": "{$v_Internet_IPv4__staticaddress}"
+}
+]
+}
+}
+}
+]
+},
+-{
+"name": "vni-0/1",
+"enable": "true",
+-"unit": [
+-{
+"name": "0",
+"description": "LAN interface: Lan-1",
+"vlan-id": "0",
+"enable": "true",
+-"family": {
+-"inet": {
+-"address": [
+-{
+"addr": "{$v_Lan-1_IPv4__staticaddress}"
+}
+]
+}
+}
+}
+]
+},
+-{
+"name": "vni-0/2",
+"enable": "true",
+-"unit": [
+-{
+"name": "0",
+"description": "LAN interface: Lan-2",
+"vlan-id": "0",
+"enable": "true",
+-"family": {
+-"inet": {
+-"address": [
+-{
+"addr": "{$v_Lan-2_IPv4__staticaddress}"
+}
+]
+}
+}
+}
+]
+}
+],
+-"tvi": [
+-{
+"name": "tvi-0/2",
+"description": "VXLAN Tunnel Interface for Alex Control VR",
+"enable": "true",
+"mode": "ipsec",
+"type": "p2mp-vxlan",
+-"unit": [
+-{
+"name": "0",
+"enable": "true",
+-"family": {
+-"inet": {
+-"address": [
+-{
+"addr": "{$v_tvi-0-2_-_Unit_0_Static_address__tunnelStaticAddress}"
+}
+]
+}
+}
+}
+]
+},
+-{
+"name": "tvi-0/3",
+"description": "ESP Tunnel Interface for Alex Control VR",
+"enable": "true",
+"mode": "ipsec",
+"type": "p2mp-esp",
+-"unit": [
+-{
+"name": "0",
+"enable": "true",
+-"family": {
+-"inet": {
+-"address": [
+-{
+"addr": "{$v_tvi-0-3_-_Unit_0_Static_address__tunnelStaticAddress}"
+}
+]
+}
+}
+}
+]
+}
+],
+-"ptvi": [
+-{
+"name": "ptvi513",
+"remote-address": "192.168.10.0",
+"parent-interface": "tvi-0/3.0"
+}
+]
+},
+-"networks": {
+-"networks": {
+-"tags": [
+"replace"
+]
+},
+-"network": [
+-{
+"name": "Internet",
+-"interfaces": [
+"vni-0/0.0"
+]
+},
+-{
+"name": "Lan-1",
+-"interfaces": [
+"vni-0/1.0"
+]
+},
+-{
+"name": "Lan-2",
+-"interfaces": [
+"vni-0/2.0"
+]
+}
+]
+},
+-"orgs": {
+-"orgs": {
+-"tags": [
+"replace"
+]
+},
+-"org": [
+-{
+"name": "Alex",
+-"appliance-owner": [
+null
+],
+-"services": [
+"sdwan"
+],
+-"available-routing-instances": [
+"Alex-Control-VR",
+"Alex-LAN-VR",
+"Internet-Transport-VR"
+],
+-"owned-routing-instances": [
+"Alex-Control-VR",
+"Alex-LAN-VR",
+"Internet-Transport-VR"
+],
+-"available-networks": [
+"Internet",
+"Lan-1",
+"Lan-2"
+],
+"dhcp-profile": "dhcp-limits",
+-"traffic-identification": {
+-"using": [
+"tvi-0/2.0",
+"tvi-0/3.0",
+"ptvi513"
+],
+-"using-networks": [
+"Lan-1",
+"Lan-2",
+"Internet"
+]
+},
+-"sd-wan": {
+-"site": {
+"global-tenant-id": "1",
+"site-name": "{$v_Alex_Site_Name__sitesSiteName}",
+"management-routing-instance": "Alex-Control-VR",
+-"wan-interfaces": {
+-"vni": [
+-{
+"name": "vni-0/0.0",
+"sla-monitoring-policy": "SLAM_Policy_vni-0/0.0"
+}
+]
+},
+-"path-policy": [
+-{
+"policy-name": "SLAM_Policy_vni-0/0.0",
+-"terms": {
+-"term": [
+-{
+"term-name": "To_Controller",
+-"match": {
+-"remote-site-type": [
+"controller"
+]
+},
+-"action": {
+-"specific-config": {
+-"forwarding-class": [
+-{
+"fc": "fc_nc"
+}
+]
+}
+}
+},
+-{
+"term-name": "To_Branches",
+-"match": {
+-"remote-site-type": [
+"branch"
+]
+},
+-"action": {
+-"specific-config": {
+-"forwarding-class": [
+-{
+"fc": "fc_ef",
+-"sla-monitoring": {
+"interval": "2000"
+}
+}
+]
+}
+}
+}
+]
+}
+}
+]
+},
+-"controllers": {
+-"controller": [
+-{
+"name": "vController-lab",
+-"management-addresses": {
+-"management-address": [
+-{
+"name": "IKE",
+"ip-address": "192.168.10.1",
+"routing-instance": "Alex-Control-VR"
+},
+-{
+"name": "secure",
+"ip-address": "192.168.10.0",
+"routing-instance": "Alex-Control-VR"
+}
+]
+}
+}
+]
+}
+},
+-"available-service-node-groups": [
+"default-sng"
+]
+}
+],
+-"org-services": [
+-{
+"name": "Alex",
+-"class-of-service": {
+-"qos-policies": {
+-"qos-policy-group": [
+-{
+"name": "Default-Policy"
+}
+]
+},
+-"app-qos-policies": {
+-"app-qos-policy-group": [
+-{
+"name": "Default-Policy"
+}
+]
+}
+},
+-"ipsec": {
+-"vpn-profile": [
+-{
+"name": "vController-lab-Profile",
+"vpn-type": "branch-sdwan",
+"branch-sdwan-profile": "b2b-sdwan",
+-"local-auth-info": {
+"auth-type": "psk",
+"id-type": "email",
+"key": "{$v_Alex_vController-lab_Local_auth_email_key__IKELKey}",
+"id-string": "{$v_Alex_vController-lab_Local_auth_email_identifier__IKELIdentifier}"
+},
+-"local": {
+"interface-name": "tvi-0/2.0"
+},
+"routing-instance": "Alex-Control-VR",
+"tunnel-routing-instance": "Alex-Control-VR",
+"tunnel-initiate": "automatic",
+-"ipsec": {
+"transform": "esp-aes128-gcm",
+-"life": {
+"duration": "28000"
+}
+},
+-"ike": {
+"group": "mod19",
+"transform": "aes256-sha256",
+"lifetime": "28800",
+"dpd-timeout": "10"
+},
+-"peer-auth-info": {
+"auth-type": "psk",
+"id-type": "email",
+"key": "CE2R9h0T/pkP3N/nJ1rpJb93Fb379wpkdVr84rjXgF6p9OKt2oYcS5tAgN4Ct++sTtycxF510Jl4Y8WH1VvwC4iJvKjBtTNlnD2zX83CKptCFt5QTI7ywgf9J7i6N919CSOniZy8hvAc90xWclMFflQ3ZVeFIWk3Sj5l6wKLOAzOun2Nfs1j3sagBO0XL+136EbBSwyEfRwji3CiHDI/EorEc+jdPXB16b1TqVKXpOcsFp9+tYH3r0qixLQFGI6JqkXXzJFGX7JOkc6Ux7Hu+EAt4P31NNZk+CSKGE/XvX4HBTHv2EYD36NfUne+gebciW0eRyzayP8bG4fmr2Xbig==",
+"id-string": "vController-lab@Alex.com"
+},
+-"peer": {
+-"address": [
+"192.168.10.1"
+]
+},
+"tunnel-interface": "ptvi513"
+}
+],
+-"branch-sdwan-profile": [
+-{
+"name": "b2b-sdwan",
+"life-time": "28800",
+"rekey-time": "6300"
+}
+]
+},
+-"lef": {
+-"collectors": {
+-"collector": [
+-{
+"name": "LEF-Collector-log_collector1",
+"destination-address": "192.168.10.0",
+"destination-port": "1234",
+"routing-instance": "Alex-Control-VR",
+"transport": "tcp",
+"template": "Default-LEF-Template"
+}
+]
+},
+-"collector-groups": {
+-"collector-group": [
+-{
+"collector-group-name": "Default-Collector-Group",
+-"collectors": [
+"LEF-Collector-log_collector1"
+]
+}
+]
+},
+-"templates": {
+-"template": [
+-{
+"name": "Default-LEF-Template",
+"type": "ipfix"
+}
+]
+},
+-"profiles": {
+-"profile": [
+-{
+"name": "Default-Logging-Profile",
+"collector-group": "Default-Collector-Group"
+}
+]
+},
+"default-profile": "Default-Logging-Profile"
+},
+-"sd-wan": {
+-"forwarding-profiles": {
+-"forwarding-profile": [
+-{
+"name": "Default-FP",
+"evaluate-continuously": "enable",
+"symmetric-forwarding": "enable",
+"reorder": "enable"
+}
+]
+},
+-"policies": {
+-"sdwan-policy-group": [
+-{
+"name": "Default-Policy"
+}
+]
+}
+},
+-"objects": {
+-"zones": {
+-"zone": [
+-{
+"name": "Intf-Internet-Zone",
+-"networks": [
+"Internet"
+]
+},
+-{
+"name": "RTI-Internet-Zone",
+"routing-instance": "Internet-Transport-VR"
+},
+-{
+"name": "ptvi"
+},
+-{
+"name": "host"
+},
+-{
+"name": "Intf-Lan-1-Zone",
+-"networks": [
+"Lan-1"
+]
+},
+-{
+"name": "Intf-Lan-2-Zone",
+-"networks": [
+"Lan-2"
+]
+}
+]
+}
+},
+-"traffic-monitoring": {
+-"logging-control": {
+-"logging-control-profile": [
+-{
+"name": "Default-Logging-Control",
+"profile": "Default-Logging-Profile",
+-"options": {
+-"stats": {
+-"all": [
+null
+]
+}
+}
+}
+]
+}
+}
+}
+]
+},
+-"dhcp-profiles": {
+-"dhcp-profiles": {
+-"tags": [
+"replace"
+]
+},
+-"dhcp-profile": [
+-{
+"name": "dhcp-limits",
+"description": "DHCP profile",
+-"dhcp-options": {
+"max-servers": "100",
+"max-relays": "100",
+"max-clients": "8192"
+}
+}
+]
+},
+-"protocols": {
+-"protocols": {
+-"tags": [
+"replace"
+]
+},
+-"lldp": {
+"enable": "true"
+}
+},
+-"routing-instances": {
+-"routing-instances": {
+-"tags": [
+"replace"
+]
+},
+-"routing-instance": [
+-{
+"name": "Internet-Transport-VR",
+"instance-type": "virtual-router",
+-"networks": [
+"Internet"
+],
+-"routing-options": {
+-"static": {
+-"route": {
+-"rti-static-route-list": [
+-{
+"ip-prefix": "0.0.0.0/0",
+"next-hop": "{$v_Internet-Transport-VR_IPv4__vrHopAddress}",
+"interface": "none",
+"tag": "0"
+}
+]
+}
+}
+}
+},
+-{
+"name": "Alex-Control-VR",
+"instance-type": "virtual-router",
+-"interfaces": [
+"tvi-0/2.0",
+"tvi-0/3.0",
+"ptvi513"
+],
+-"mpls-vpn-core": [
+null
+],
+-"routing-options": {
+-"rti-mpls-vpn-local-router-interface": {
+"family": "inet",
+"interface": "tvi-0/3.0"
+}
+},
+-"protocols": {
+-"bgp": {
+-"rti-bgp": [
+-{
+"instance-id": "1",
+"local-address": "{$v_Alex-Control-VR_1_Local_address__vrRouterAddress}",
+-"graceful-restart": {
+-"enable": [
+null
+],
+"maximum-restart-time": "3600",
+"recovery-time": "3600",
+"select-defer-time": "30",
+"stalepath-time": "3600",
+"multiplier": "8"
+},
+-"routing-peer-policy": [
+-{
+"name": "Import-From-SDWAN-Policy",
+-"term": [
+-{
+"term-name": "Allow-All",
+-"action": {
+"filter": "accept",
+"community": "8009:8009",
+"community-action": "set-specific",
+"next-term": "Allow-Comm"
+}
+},
+-{
+"term-name": "Allow-Comm",
+-"action": {
+"filter": "accept",
+"community": "8015:0",
+"community-action": "set-specific"
+}
+},
+-{
+"term-name": "Allow-VersaPvt-All",
+-"match": {
+"family": "versa-private"
+},
+-"action": {
+"filter": "accept"
+}
+}
+]
+}
+],
+"router-id": "{$v_Alex-Control-VR_1_Router_ID__vrRouteId}",
+-"local-as": {
+"as-number": "64512"
+},
+-"group": [
+-{
+"name": "Controllers-Group",
+"type": "internal",
+-"family": {
+-"inet": {
+-"unicast": {
+-"prefix-limit-control": {
+"threshold": "75"
+}
+},
+-"versa-private": {
+-"prefix-limit-control": {
+"threshold": "75"
+}
+}
+},
+-"inet-vpn": {
+-"unicast": {
+-"prefix-limit-control": {
+"threshold": "75"
+}
+}
+},
+-"inet6-vpn": {
+-"unicast": {
+-"prefix-limit-control": {
+"threshold": "75"
+}
+}
+}
+},
+"import": "Import-From-SDWAN-Policy",
+"peer-as": "64512",
+-"neighbor": [
+-{
+"bgp-neighbor-ip": "192.168.10.0"
+}
+]
+}
+]
+}
+]
+}
+},
+-"policy-options": {
+-"redistribution-policy": [
+-{
+"name": "Control-VR-Policy",
+-"term": [
+-{
+"term-name": "Paired-TVI-Reject",
+-"match": {
+"address": "169.254.0.0/16"
+},
+-"action": {
+"filter": "reject"
+}
+},
+-{
+"term-name": "SDWAN-TVI1-Reject",
+-"match": {
+"address": "{$v_tvi-0-2_-_Unit_0_Static_address__tunnelStaticAddress}"
+},
+-"action": {
+"filter": "reject"
+}
+},
+-{
+"term-name": "SDWAN-TVI2-Reject",
+-"match": {
+"address": "{$v_tvi-0-3_-_Unit_0_Static_address__tunnelStaticAddress}"
+},
+-"action": {
+"filter": "reject"
+}
+},
+-{
+"term-name": "DIRECT",
+-"match": {
+"protocol": "direct"
+},
+-"action": {
+"filter": "accept",
+"set-origin": "igp"
+}
+}
+]
+}
+],
+"redistribute-to-bgp": "Control-VR-Policy"
+}
+},
+-{
+"name": "Alex-LAN-VR",
+"instance-type": "vrf",
+"global-vrf-id": "2",
+-"networks": [
+"Lan-1",
+"Lan-2"
+],
+"route-distinguisher": "2L:{$v_Site_Id__siteSiteID}",
+"vrf-both-target": "target:2L:2",
+"mpls-vpn-core-instance": "Alex-Control-VR",
+-"policy-options": {
+-"redistribution-policy": [
+-{
+"name": "Default-Policy-To-BGP",
+-"term": [
+-{
+"term-name": "T1-Paired-TVI-Direct",
+-"match": {
+"protocol": "direct",
+"address": "169.254.0.0/16"
+},
+-"action": {
+"filter": "reject"
+}
+},
+-{
+"term-name": "T2-DIRECT",
+-"match": {
+"protocol": "direct"
+},
+-"action": {
+"filter": "accept",
+"set-origin": "igp",
+"set-local-preference": "110"
+}
+}
+]
+}
+],
+"redistribute-to-bgp": "Default-Policy-To-BGP"
+}
+}
+]
+},
+-"service-node-groups": {
+-"service-node-groups": {
+-"tags": [
+"replace"
+]
+},
+-"service-node-group": [
+-{
+"name": "default-sng",
+"id": "0",
+"type": "internal",
+-"services": [
+"sdwan"
+]
+}
+]
+},
+-"system": {
+-"vnf-manager": {
+-"@@vnf-manager": {
+-"tags": [
+"replace"
+]
+},
+-"ip-addresses": [
+"172.17.152.214/24"
+],
+-"vnf-mgmt-interfaces": [
+"vni-0/1.0"
+]
+},
+-"identification": {
+-"@@identification": {
+-"tags": [
+"replace"
+]
+},
+"name": "{$v_identification__IdName}",
+"location": "{$v_location__IdLocation}",
+"latitude": "{$v_latitude__IdLatitude}",
+"longitude": "{$v_longitude__Idlongitude}"
+},
+-"session": {
+-"@@session": {
+-"tags": [
+"replace"
+]
+},
+"check-tcp-syn": "false",
+"reevaluate-reverse-flow": "false",
+"tcp-send-reset": "false",
+"tcp-secure-reset": "false",
+-"tcp-adjust-mss": {
+"enable": "true",
+"interface-types": "all"
+}
+},
+-"services": {
+-"@@services": {
+-"tags": [
+"replace"
+]
+},
+"ssh": "enabled",
+"sftp": "disabled",
+"www": "enabled"
+},
+-"subjugate": {
+-"@@subjugate": {
+-"tags": [
+"replace"
+]
+},
+"enabled": "true"
+},
+-"sd-wan": {
+-"@@sd-wan": {
+-"tags": [
+"replace"
+]
+},
+-"site": {
+"site-type": "branch",
+"chassis-id": "{$v_Chassis_Id__sitesChassisId}",
+"site-id": "{$v_Site_Id__siteSiteID}",
+"provider-org": "Alex",
+-"wan-interfaces": {
+-"vni": [
+-{
+"name": "vni-0/0.0",
+-"transport-domains": [
+"Internet"
+],
+-"inet": {
+"circuit-name": "Internet"
+}
+}
+]
+}
+},
+-"transport-domains": {
+-"transport-domain": [
+-{
+"name": "Internet",
+"id": "20",
+"description": "Public internet routing domain"
+}
+]
+},
+-"controllers": {
+-"controller": [
+-{
+"name": "vController-lab",
+"site-name": "vController-lab",
+"site-id": "1",
+-"transport-addresses": {
+-"transport-address": [
+-{
+"name": "vController-lab-Transport-Internet",
+"ip-address": "110.1.1.203",
+-"transport-domains": [
+"Internet"
+]
+}
+]
+}
+}
+]
+}
+}
+}
+}
