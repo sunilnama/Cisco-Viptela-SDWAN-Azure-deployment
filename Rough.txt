@@ -17,14 +17,43 @@ https://support.juniper.net/support/downloads/?p=apstra
 https://apc01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fuserregistration.juniper.net%2FvalidateRegistration%2Fc3VuaWwubmFtYUBoY2x0ZWNoLmNvbQ%3D%3D&data=05%7C02%7Csunil.nama%40hcltech.com%7C33a2e34d179a41f02db708de72d380c1%7C189de737c93a4f5a8b686f4ca9941912%7C0%7C0%7C639074449913212471%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=Ngf0yUBWRWLoPB4ju4%2BaAnnEyUy9gkEnTNjV9WFtOls%3D&reserved=0
 
 
-Use open_drawio_mermaid to create a professional workflow:
+Use draw.io MCP to create a workflow diagram for Versa BGP up/down automation.
 
-Employee submits request -> Manager approval -> Finance approval -> Procurement -> Order placed -> Delivery -> Completed
+Flow requirements:
+1. Monitor BGP neighbor status
+2. Detect up/down event
+3. Send event to automation engine
+4. Fetch device, peer, VRF, and site details
+5. Check whether event is DOWN or UP
 
-Requirements:
-- Add decision nodes for approvals
-- Clean layout left to right
-- Proper labels
+DOWN branch:
+- Validate outage persistence
+- Run health checks
+- Check interface state
+- Check underlay reachability
+- Check routing policy/session logs
+- Generate alert
+- Open or update incident ticket
+- Notify NOC / Ops team
+- Log remediation recommendation
+
+UP branch:
+- Confirm session is stable
+- Verify route learning/restoration
+- Clear or downgrade alert
+- Update incident ticket
+- Notify stakeholders
+- Log recovery confirmation
+
+Final step:
+- Store audit trail and close workflow
+
+Format:
+- left-to-right
+- decision diamond for UP/DOWN
+- process boxes for actions
+- clear labels
+- professional operations workflow
 
 
 https://userregistration.juniper.net/changePasswordWithUnlockKey/8640af3251ac1b5196c66f8edd9b9fc9/4d5c139e
